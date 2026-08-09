@@ -52,6 +52,7 @@ type snapshotDocument struct {
 	RetainedEventCount      int             `json:"retainedEventCount"`
 	ObservedCount           uint64          `json:"observedCount"`
 	EmittedCount            uint64          `json:"emittedCount"`
+	SkippedWarmupCount      uint64          `json:"skippedNonGenerationCount"`
 	MissingCorrelationCount uint64          `json:"missingCorrelationCount"`
 	MissingSampleIDCount    uint64          `json:"missingSampleIdCount"`
 	MissingTtftCount        uint64          `json:"missingTtftCount"`
@@ -73,6 +74,7 @@ type snapshotPlugin struct {
 	events                  []snapshotEvent
 	observedCount           uint64
 	emittedCount            uint64
+	skippedWarmupCount      uint64
 	missingCorrelationCount uint64
 	missingSampleIDCount    uint64
 	missingTtftCount        uint64
@@ -138,12 +140,18 @@ func (p *snapshotPlugin) HandleUsage(_ context.Context, record coreusage.Record)
 	if p == nil || strings.TrimSpace(p.path) == "" {
 		return
 	}
+	if !coreusage.GenerateEnabled(record.Generate) {
+		p.mu.Lock()
+		incrementBoundedCounter(&p.skippedWarmupCount)
+		p.mu.Unlock()
+		return
+	}
 	p.mu.Lock()
 	defer p.mu.Unlock()
 
 	now := p.now()
-	p.observedCount++
 	p.pruneExpired(now)
+	p.observedCount++
 	if !validCorrelationID(record.CorrelationID) {
 		p.missingCorrelationCount++
 		p.writeLocked(now)
@@ -241,6 +249,7 @@ func (p *snapshotPlugin) writeLocked(now time.Time) {
 		RetainedEventCount:      len(p.events),
 		ObservedCount:           p.observedCount,
 		EmittedCount:            p.emittedCount,
+		SkippedWarmupCount:      p.skippedWarmupCount,
 		MissingCorrelationCount: p.missingCorrelationCount,
 		MissingSampleIDCount:    p.missingSampleIDCount,
 		MissingTtftCount:        p.missingTtftCount,
@@ -261,6 +270,13 @@ func (p *snapshotPlugin) writeLocked(now time.Time) {
 		log.Info("TTFT O11Y snapshot writes recovered")
 	}
 	p.consecutiveWriteErrors = 0
+}
+
+func incrementBoundedCounter(value *uint64) {
+	if value == nil || *value >= uint64(maxSafeJSONInteger) {
+		return
+	}
+	(*value)++
 }
 
 func writeSnapshot(path string, document snapshotDocument) error {

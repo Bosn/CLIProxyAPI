@@ -146,6 +146,55 @@ func TestSnapshotCountsMissingCorrelationAndTTFTWithoutPersistingUsagePayload(t 
 	}
 }
 
+func TestSnapshotSkipsNonGenerationWarmupWithoutReservingItsSample(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "ttft-snapshot.json")
+	now := time.Date(2026, time.August, 9, 8, 30, 0, 0, time.UTC)
+	plugin := newSnapshotPlugin(path, func() time.Time { return now })
+	record := coreusage.Record{
+		Provider: "openai", Model: "gpt-5.6-sol", CorrelationID: "4bf92f3577b34da6a3ce929d",
+		SampleID: "s_c2fab392c1cde0e40d2f97bd1b385913", TTFT: 250 * time.Millisecond,
+		Generate: coreusage.GenerateFlag(false),
+	}
+
+	plugin.HandleUsage(context.Background(), record)
+	if _, errStat := os.Stat(path); !os.IsNotExist(errStat) {
+		t.Fatalf("warmup wrote a native TTFT snapshot: %v", errStat)
+	}
+
+	record.Generate = coreusage.GenerateFlag(true)
+	plugin.HandleUsage(context.Background(), record)
+	document := readSnapshotDocument(t, path)
+	if document.ObservedCount != 1 || document.EmittedCount != 1 ||
+		document.SkippedWarmupCount != 1 ||
+		document.DuplicateSampleCount != 0 || len(document.Events) != 1 {
+		t.Fatalf("actual generation did not retain the sample after warmup: %+v", document)
+	}
+}
+
+func TestSnapshotBoundsSkippedNonGenerationCounter(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "ttft-snapshot.json")
+	now := time.Date(2026, time.August, 9, 8, 30, 0, 0, time.UTC)
+	plugin := newSnapshotPlugin(path, func() time.Time { return now })
+	plugin.skippedWarmupCount = uint64(maxSafeJSONInteger - 1)
+
+	for range 2 {
+		plugin.HandleUsage(context.Background(), coreusage.Record{
+			Generate: coreusage.GenerateFlag(false),
+		})
+	}
+	plugin.HandleUsage(context.Background(), coreusage.Record{
+		Provider: "openai", Model: "gpt-5.6-sol", CorrelationID: "4bf92f3577b34da6a3ce929d",
+		SampleID: "s_c2fab392c1cde0e40d2f97bd1b385913", TTFT: 250 * time.Millisecond,
+		Generate: coreusage.GenerateFlag(true),
+	})
+
+	document := readSnapshotDocument(t, path)
+	if document.SkippedWarmupCount != uint64(maxSafeJSONInteger) {
+		t.Fatalf("skipped non-generation count = %d, want bounded maximum %d",
+			document.SkippedWarmupCount, maxSafeJSONInteger)
+	}
+}
+
 func readSnapshotDocument(t *testing.T, path string) snapshotDocument {
 	t.Helper()
 	raw, errRead := os.ReadFile(path)
