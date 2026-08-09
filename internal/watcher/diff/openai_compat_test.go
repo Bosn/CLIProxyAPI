@@ -51,6 +51,22 @@ func TestDiffOpenAICompatibilityPromptCacheKey(t *testing.T) {
 	expectContains(t, changes, "provider updated: provider-a (support-prompt-cache-key false -> true)")
 }
 
+func TestDiffOpenAICompatibilityResponsesChatFidelity(t *testing.T) {
+	oldList := []config.OpenAICompatibility{{Name: "provider-a", ResponsesChatFidelity: false}}
+	newList := []config.OpenAICompatibility{{Name: "provider-a", ResponsesChatFidelity: true}}
+
+	changes := DiffOpenAICompatibility(oldList, newList)
+	expectContains(t, changes, "provider updated: provider-a (responses-chat-fidelity false -> true)")
+}
+
+func TestOpenAICompatSignatureIncludesResponsesChatFidelity(t *testing.T) {
+	withoutFidelity := openAICompatSignature(config.OpenAICompatibility{})
+	withFidelity := openAICompatSignature(config.OpenAICompatibility{ResponsesChatFidelity: true})
+	if withFidelity == "" || withFidelity == withoutFidelity {
+		t.Fatalf("responses-chat-fidelity did not change signature: without=%q with=%q", withoutFidelity, withFidelity)
+	}
+}
+
 func TestDiffOpenAICompatibilityDuplicateNames(t *testing.T) {
 	oldList := []config.OpenAICompatibility{
 		{Name: "duplicate", SupportPromptCacheKey: false},
