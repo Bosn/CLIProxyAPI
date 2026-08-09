@@ -33,6 +33,7 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/safemode"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/store"
 	_ "github.com/router-for-me/CLIProxyAPI/v7/internal/translator"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/ttfto11y"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/tui"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/util"
 	sdkAuth "github.com/router-for-me/CLIProxyAPI/v7/sdk/auth"
@@ -671,6 +672,9 @@ func main() {
 		}
 		if localModel && (!tuiMode || standalone) {
 			log.Info("Local model mode: using embedded model catalogs, remote model updates disabled")
+		}
+		if !tuiMode || standalone {
+			ttfto11y.RegisterDefault()
 		}
 		if tuiMode {
 			if standalone {
