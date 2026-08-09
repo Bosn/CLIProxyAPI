@@ -19,6 +19,7 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/runtime/executor/helps"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/thinking"
+	translatorcommon "github.com/router-for-me/CLIProxyAPI/v7/internal/translator/common"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/util"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
@@ -34,6 +35,7 @@ const (
 	openAICompatImagesEditsPath             = "/images/edits"
 	openAICompatDefaultImageEndpoint        = openAICompatImagesGenerationsPath
 	openAICompatMultipartMemory       int64 = 32 << 20
+	openAICompatProgressGuardMaxBytes       = 8 << 20
 )
 
 // OpenAICompatExecutor implements a stateless executor for OpenAI-compatible providers.
@@ -117,6 +119,10 @@ func (e *OpenAICompatExecutor) Execute(ctx context.Context, auth *cliproxyauth.A
 	isCompat := helps.APIKeyModelIsCompat(req)
 	originalTranslated := helps.TranslateRequestWithAPIKeyModelCompatibility(ctx, opts.Headers, e.cfg, from, to, baseModel, originalPayload, opts.Stream, isCompat)
 	translated := helps.TranslateRequestWithAPIKeyModelCompatibility(ctx, opts.Headers, e.cfg, from, to, baseModel, req.Payload, opts.Stream, isCompat)
+	originalTranslated = e.applyResponsesChatFidelity(auth, from, opts.Alt, originalPayload, originalTranslated)
+	translated = e.applyResponsesChatFidelity(auth, from, opts.Alt, req.Payload, translated)
+	originalTranslated = e.applyResponsesChatPhaseBridge(auth, from, opts.Alt, baseModel, originalPayload, originalTranslated)
+	translated = e.applyResponsesChatPhaseBridge(auth, from, opts.Alt, baseModel, req.Payload, translated)
 
 	translated, err = helps.ApplyRequestThinking(translated, req, opts, from.String(), to.String(), e.Identifier())
 	if err != nil {
@@ -142,6 +148,10 @@ func (e *OpenAICompatExecutor) Execute(ctx context.Context, auth *cliproxyauth.A
 		translated = sanitizeOpenAIResponsesReasoningEncryptedContent(ctx, "openai compat executor", translated)
 	}
 	reporter.SetTranslatedReasoningEffort(translated, to.String())
+	responseTranslationRequest := translated
+	if e.responsesChatPhaseBridgeActive(auth, from, opts.Alt, baseModel) {
+		responseTranslationRequest = translatorcommon.MarkOpenAIResponsesChatPhaseBridge(translated)
+	}
 
 	url := strings.TrimSuffix(baseURL, "/") + endpoint
 	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(translated))
@@ -207,7 +217,7 @@ func (e *OpenAICompatExecutor) Execute(ctx context.Context, auth *cliproxyauth.A
 	reporter.EnsurePublished(ctx)
 	// Translate response back to source format when needed
 	var param any
-	out := sdktranslator.TranslateNonStream(ctx, to, responseFormat, req.Model, opts.OriginalRequest, translated, body, &param)
+	out := sdktranslator.TranslateNonStream(ctx, to, responseFormat, req.Model, opts.OriginalRequest, responseTranslationRequest, body, &param)
 	if responseFormat == sdktranslator.FormatOpenAIResponse {
 		out = helps.EnsureResponsesUsageDetails(out)
 	}
@@ -331,6 +341,10 @@ func (e *OpenAICompatExecutor) ExecuteStream(ctx context.Context, auth *cliproxy
 	isCompat := helps.APIKeyModelIsCompat(req)
 	originalTranslated := helps.TranslateRequestWithAPIKeyModelCompatibility(ctx, opts.Headers, e.cfg, from, to, baseModel, originalPayload, true, isCompat)
 	translated := helps.TranslateRequestWithAPIKeyModelCompatibility(ctx, opts.Headers, e.cfg, from, to, baseModel, req.Payload, true, isCompat)
+	originalTranslated = e.applyResponsesChatFidelity(auth, from, opts.Alt, originalPayload, originalTranslated)
+	translated = e.applyResponsesChatFidelity(auth, from, opts.Alt, req.Payload, translated)
+	originalTranslated = e.applyResponsesChatPhaseBridge(auth, from, opts.Alt, baseModel, originalPayload, originalTranslated)
+	translated = e.applyResponsesChatPhaseBridge(auth, from, opts.Alt, baseModel, req.Payload, translated)
 
 	translated, err = helps.ApplyRequestThinking(translated, req, opts, from.String(), to.String(), e.Identifier())
 	if err != nil {
@@ -354,6 +368,12 @@ func (e *OpenAICompatExecutor) ExecuteStream(ctx context.Context, auth *cliproxy
 	// are captured even when the upstream is an OpenAI-compatible provider.
 	translated = helps.SetBoolIfDifferent(translated, "stream_options.include_usage", true)
 	reporter.SetTranslatedReasoningEffort(translated, to.String())
+	responseTranslationRequest := translated
+	phaseBridgeActive := e.responsesChatPhaseBridgeActive(auth, from, opts.Alt, baseModel)
+	if phaseBridgeActive {
+		responseTranslationRequest = translatorcommon.MarkOpenAIResponsesChatPhaseBridge(translated)
+	}
+	progressGuardEnabled := phaseBridgeActive && len(gjson.GetBytes(translated, "tools").Array()) > 0
 
 	url := strings.TrimSuffix(baseURL, "/") + "/chat/completions"
 	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(translated))
@@ -411,161 +431,309 @@ func (e *OpenAICompatExecutor) ExecuteStream(ctx context.Context, auth *cliproxy
 	out := make(chan cliproxyexecutor.StreamChunk)
 	go func() {
 		defer close(out)
+		currentResp := httpResp
+		currentTranslated := translated
+		currentTranslationRequest := responseTranslationRequest
+		currentReporter := reporter
+		attempt := 0
+		var activeBody io.ReadCloser
 		defer func() {
-			if errClose := httpResp.Body.Close(); errClose != nil {
-				log.Errorf("openai compat executor: close response body error: %v", errClose)
+			if activeBody != nil {
+				if errClose := activeBody.Close(); errClose != nil {
+					log.Errorf("openai compat executor: close response body error: %v", errClose)
+				}
 			}
 		}()
-		scanner := bufio.NewScanner(httpResp.Body)
-		scanner.Buffer(nil, 52_428_800) // 50MB
-		claudeInputTokens := helps.NewClaudeInputTokenState(from, to, responseFormat, originalPayload)
-		var param any
-		var streamUsage helps.StreamUsageBuffer
-		var seenDone bool
-		var streamFailed bool
-		var streamAborted bool
-		var upstreamEvent string
-		var frameData [][]byte
-		defer streamUsage.Publish(ctx, reporter)
+		for {
+			activeBody = currentResp.Body
+			scanner := bufio.NewScanner(currentResp.Body)
+			scanner.Buffer(nil, 52_428_800) // 50MB
+			claudeInputTokens := helps.NewClaudeInputTokenState(from, to, responseFormat, originalPayload)
+			var param any
+			var streamUsage helps.StreamUsageBuffer
+			var seenDone bool
+			var streamFailed bool
+			var streamAborted bool
+			var upstreamEvent string
+			var frameData [][]byte
+			var progressGuard helps.OpenAIResponsesChatProgressGuard
+			holdForProgressDecision := progressGuardEnabled && attempt == 0
+			bufferedFrames := make([][]byte, 0)
+			bufferedBytes := 0
 
-		publishStreamError := func(streamErr statusErr, containsPayload bool) {
-			loggedErr := streamErr
-			if containsPayload {
-				loggedErr = statusErr{code: streamErr.code, msg: "upstream stream returned an error payload"}
+			emitFrame := func(streamLine []byte) bool {
+				chunks := helps.TranslateStreamWithClaudeInputTokens(
+					ctx,
+					to,
+					responseFormat,
+					req.Model,
+					opts.OriginalRequest,
+					currentTranslationRequest,
+					streamLine,
+					&param,
+					claudeInputTokens,
+				)
+				for i := range chunks {
+					select {
+					case out <- cliproxyexecutor.StreamChunk{Payload: chunks[i]}:
+					case <-ctx.Done():
+						streamAborted = true
+						return false
+					}
+				}
+				return true
 			}
-			helps.RecordAPIResponseError(ctx, e.cfg, loggedErr)
-			reporter.PublishFailure(ctx, loggedErr)
-			select {
-			case out <- cliproxyexecutor.StreamChunk{Err: streamErr}:
-			case <-ctx.Done():
+			emitBuffered := func() bool {
+				for _, frame := range bufferedFrames {
+					if !emitFrame(frame) {
+						return false
+					}
+				}
+				bufferedFrames = nil
+				return true
 			}
-			streamFailed = true
-		}
+			deliverFrame := func(streamLine []byte) bool {
+				if !holdForProgressDecision {
+					return emitFrame(streamLine)
+				}
+				bufferedFrames = append(bufferedFrames, bytes.Clone(streamLine))
+				bufferedBytes += len(streamLine)
+				progressGuard.Observe(streamLine)
+				if progressGuard.SawToolCall() || bufferedBytes > openAICompatProgressGuardMaxBytes {
+					holdForProgressDecision = false
+					return emitBuffered()
+				}
+				return true
+			}
 
-		processFrame := func() bool {
-			eventName := upstreamEvent
-			upstreamEvent = ""
-			dataLines := frameData
-			frameData = nil
-			if len(dataLines) == 0 {
-				if openAICompatErrorEvent(eventName) {
-					publishStreamError(statusErr{code: http.StatusBadGateway, msg: "upstream error event ended without data"}, false)
+			publishStreamError := func(streamErr statusErr, containsPayload bool) {
+				loggedErr := streamErr
+				if containsPayload {
+					loggedErr = statusErr{code: streamErr.code, msg: "upstream stream returned an error payload"}
+				}
+				helps.RecordAPIResponseError(ctx, e.cfg, loggedErr)
+				currentReporter.PublishFailure(ctx, loggedErr)
+				select {
+				case out <- cliproxyexecutor.StreamChunk{Err: streamErr}:
+				case <-ctx.Done():
+				}
+				streamFailed = true
+			}
+
+			processFrame := func() bool {
+				eventName := upstreamEvent
+				upstreamEvent = ""
+				dataLines := frameData
+				frameData = nil
+				if len(dataLines) == 0 {
+					if openAICompatErrorEvent(eventName) {
+						publishStreamError(
+							statusErr{code: http.StatusBadGateway, msg: "upstream error event ended without data"},
+							false,
+						)
+						return true
+					}
+					return false
+				}
+
+				if len(dataLines) > 1 {
+					for _, dataLine := range dataLines {
+						if bytes.Equal(bytes.TrimSpace(dataLine), []byte("[DONE]")) {
+							publishStreamError(
+								statusErr{code: http.StatusBadGateway, msg: "upstream stream ended with incomplete data before [DONE]"},
+								false,
+							)
+							return true
+						}
+					}
+				}
+				dataPayload := bytes.TrimSpace(bytes.Join(dataLines, []byte("\n")))
+				isDone := bytes.Equal(dataPayload, []byte("[DONE]"))
+				if isDone && openAICompatErrorEvent(eventName) {
+					publishStreamError(
+						statusErr{code: http.StatusBadGateway, msg: "upstream error event ended before [DONE]"},
+						false,
+					)
+					return true
+				}
+				if !isDone && !json.Valid(dataPayload) {
+					publishStreamError(
+						statusErr{code: http.StatusBadGateway, msg: "upstream stream ended with incomplete SSE data frame"},
+						false,
+					)
+					return true
+				}
+				if !isDone {
+					if streamErr, isError := openAICompatStreamDataError(dataPayload, eventName); isError {
+						publishStreamError(streamErr, true)
+						return true
+					}
+				}
+
+				streamLine := append([]byte("data: "), dataPayload...)
+				if !deliverFrame(streamLine) {
+					return true
+				}
+				if isDone {
+					seenDone = true
 					return true
 				}
 				return false
 			}
 
-			if len(dataLines) > 1 {
-				for _, dataLine := range dataLines {
-					if bytes.Equal(bytes.TrimSpace(dataLine), []byte("[DONE]")) {
-						publishStreamError(statusErr{code: http.StatusBadGateway, msg: "upstream stream ended with incomplete data before [DONE]"}, false)
-						return true
+		scanLoop:
+			for scanner.Scan() {
+				line := scanner.Bytes()
+				helps.AppendAPIResponseChunk(ctx, e.cfg, line)
+				streamUsage.ObserveOpenAIStream(line)
+				trimmedLine := bytes.TrimSpace(line)
+				if len(trimmedLine) == 0 {
+					if processFrame() {
+						break scanLoop
 					}
+					continue
+				}
+				if bytes.HasPrefix(trimmedLine, []byte("data:")) {
+					frameData = append(
+						frameData,
+						bytes.Clone(bytes.TrimSpace(trimmedLine[len("data:"):])),
+					)
+					continue
+				}
+				if bytes.HasPrefix(trimmedLine, []byte("event:")) {
+					upstreamEvent = strings.TrimSpace(string(trimmedLine[len("event:"):]))
+					continue
+				}
+				if bytes.HasPrefix(trimmedLine, []byte(":")) ||
+					bytes.HasPrefix(trimmedLine, []byte("id:")) ||
+					bytes.HasPrefix(trimmedLine, []byte("retry:")) {
+					continue
+				}
+				if bytes.HasPrefix(trimmedLine, []byte("{")) ||
+					bytes.HasPrefix(trimmedLine, []byte("[")) {
+					publishStreamError(
+						statusErr{code: http.StatusBadGateway, msg: string(trimmedLine)},
+						true,
+					)
+					break
 				}
 			}
-			dataPayload := bytes.TrimSpace(bytes.Join(dataLines, []byte("\n")))
-			isDone := bytes.Equal(dataPayload, []byte("[DONE]"))
-			if isDone && openAICompatErrorEvent(eventName) {
-				publishStreamError(statusErr{code: http.StatusBadGateway, msg: "upstream error event ended before [DONE]"}, false)
-				return true
+			errScan := scanner.Err()
+			if errScan == nil && !seenDone && !streamFailed && !streamAborted && len(frameData) > 0 {
+				_ = processFrame()
 			}
-			if !isDone && !json.Valid(dataPayload) {
-				publishStreamError(statusErr{code: http.StatusBadGateway, msg: "upstream stream ended with incomplete SSE data frame"}, false)
-				return true
+			if errClose := currentResp.Body.Close(); errClose != nil {
+				log.Errorf("openai compat executor: close response body error: %v", errClose)
 			}
-			if !isDone {
-				if streamErr, isError := openAICompatStreamDataError(dataPayload, eventName); isError {
-					publishStreamError(streamErr, true)
-					return true
-				}
+			activeBody = nil
+			if streamFailed || streamAborted {
+				return
 			}
-
-			streamLine := append([]byte("data: "), dataPayload...)
-			chunks := helps.TranslateStreamWithClaudeInputTokens(ctx, to, responseFormat, req.Model, opts.OriginalRequest, translated, streamLine, &param, claudeInputTokens)
-			for i := range chunks {
+			if errScan != nil {
+				helps.RecordAPIResponseError(ctx, e.cfg, errScan)
+				currentReporter.PublishFailure(ctx, errScan)
 				select {
-				case out <- cliproxyexecutor.StreamChunk{Payload: chunks[i]}:
+				case out <- cliproxyexecutor.StreamChunk{Err: errScan}:
 				case <-ctx.Done():
-					streamAborted = true
-					return true
 				}
+				return
 			}
-			if isDone {
-				seenDone = true
-				return true
-			}
-			return false
-		}
-
-	scanLoop:
-		for scanner.Scan() {
-			line := scanner.Bytes()
-			helps.AppendAPIResponseChunk(ctx, e.cfg, line)
-			streamUsage.ObserveOpenAIStream(line)
-			trimmedLine := bytes.TrimSpace(line)
-			if len(trimmedLine) == 0 {
-				if processFrame() {
-					break scanLoop
+			if !seenDone && responseFormat == sdktranslator.FormatOpenAIResponse {
+				streamErr := statusErr{
+					code: http.StatusBadGateway,
+					msg:  "upstream stream closed before [DONE]",
 				}
-				continue
-			}
-			if bytes.HasPrefix(trimmedLine, []byte("data:")) {
-				frameData = append(frameData, bytes.Clone(bytes.TrimSpace(trimmedLine[len("data:"):])))
-				continue
-			}
-			if bytes.HasPrefix(trimmedLine, []byte("event:")) {
-				upstreamEvent = strings.TrimSpace(string(trimmedLine[len("event:"):]))
-				continue
-			}
-			if bytes.HasPrefix(trimmedLine, []byte(":")) || bytes.HasPrefix(trimmedLine, []byte("id:")) || bytes.HasPrefix(trimmedLine, []byte("retry:")) {
-				continue
-			}
-			if bytes.HasPrefix(trimmedLine, []byte("{")) || bytes.HasPrefix(trimmedLine, []byte("[")) {
-				publishStreamError(statusErr{code: http.StatusBadGateway, msg: string(trimmedLine)}, true)
-				break
-			}
-		}
-		errScan := scanner.Err()
-		if errScan == nil && !seenDone && !streamFailed && !streamAborted && len(frameData) > 0 {
-			_ = processFrame()
-		}
-		if streamFailed || streamAborted {
-			return
-		}
-		if errScan != nil {
-			helps.RecordAPIResponseError(ctx, e.cfg, errScan)
-			reporter.PublishFailure(ctx, errScan)
-			select {
-			case out <- cliproxyexecutor.StreamChunk{Err: errScan}:
-			case <-ctx.Done():
-			}
-		} else if !seenDone {
-			// Responses clients require an explicit terminal event. Treat a clean
-			// upstream EOF without [DONE] as a failed stream instead of completing it.
-			if responseFormat == sdktranslator.FormatOpenAIResponse {
-				streamErr := statusErr{code: http.StatusBadGateway, msg: "upstream stream closed before [DONE]"}
 				helps.RecordAPIResponseError(ctx, e.cfg, streamErr)
-				reporter.PublishFailure(ctx, streamErr)
+				currentReporter.PublishFailure(ctx, streamErr)
 				select {
 				case out <- cliproxyexecutor.StreamChunk{Err: streamErr}:
 				case <-ctx.Done():
 				}
 				return
 			}
-
-			// Other protocols retain compatibility with providers that omit [DONE].
-			chunks := helps.TranslateStreamWithClaudeInputTokens(ctx, to, responseFormat, req.Model, opts.OriginalRequest, translated, []byte("data: [DONE]"), &param, claudeInputTokens)
-			for i := range chunks {
-				select {
-				case out <- cliproxyexecutor.StreamChunk{Payload: chunks[i]}:
-				case <-ctx.Done():
+			if !seenDone {
+				if !deliverFrame([]byte("data: [DONE]")) {
 					return
 				}
+				seenDone = true
 			}
+
+			if seenDone && holdForProgressDecision && progressGuard.ShouldRetry() {
+				helps.LogWithRequestID(ctx).Warn(
+					"openai compat executor: retrying progress-only response before downstream emission",
+				)
+				streamUsage.Publish(ctx, currentReporter)
+				currentReporter.EnsurePublished(ctx)
+
+				retryTranslated := helps.ApplyOpenAIResponsesChatProgressRetryInstruction(currentTranslated)
+				retryReporter := helps.NewExecutorUsageReporter(ctx, e, baseModel, auth)
+				retryReporter.SetTranslatedReasoningEffort(retryTranslated, to.String())
+				retryReq := httpReq.Clone(ctx)
+				retryReq.Body = io.NopCloser(bytes.NewReader(retryTranslated))
+				retryReq.ContentLength = int64(len(retryTranslated))
+				retryReq.GetBody = func() (io.ReadCloser, error) {
+					return io.NopCloser(bytes.NewReader(retryTranslated)), nil
+				}
+				helps.RecordAPIRequest(ctx, e.cfg, helps.UpstreamRequestLog{
+					URL:       url,
+					Method:    http.MethodPost,
+					Headers:   retryReq.Header.Clone(),
+					Body:      retryTranslated,
+					Provider:  e.Identifier(),
+					AuthID:    authID,
+					AuthLabel: authLabel,
+					AuthType:  authType,
+					AuthValue: authValue,
+				})
+				retryClient := helps.NewProxyAwareHTTPClient(ctx, e.cfg, auth, 0)
+				retryClient = retryReporter.TrackHTTPClient(retryClient)
+				retryResp, errRetry := retryClient.Do(retryReq)
+				if errRetry == nil {
+					helps.RecordAPIResponseMetadata(
+						ctx,
+						e.cfg,
+						retryResp.StatusCode,
+						retryResp.Header.Clone(),
+					)
+					if retryResp.StatusCode < 200 || retryResp.StatusCode >= 300 {
+						body, _ := io.ReadAll(retryResp.Body)
+						helps.AppendAPIResponseChunk(ctx, e.cfg, body)
+						if errClose := retryResp.Body.Close(); errClose != nil {
+							log.Errorf(
+								"openai compat executor: close retry response body error: %v",
+								errClose,
+							)
+						}
+						errRetry = statusErr{code: retryResp.StatusCode, msg: string(body)}
+					}
+				}
+				if errRetry == nil {
+					currentResp = retryResp
+					currentTranslated = retryTranslated
+					currentTranslationRequest = retryTranslated
+					if phaseBridgeActive {
+						currentTranslationRequest =
+							translatorcommon.MarkOpenAIResponsesChatPhaseBridge(retryTranslated)
+					}
+					currentReporter = retryReporter
+					attempt++
+					continue
+				}
+				helps.RecordAPIResponseError(ctx, e.cfg, errRetry)
+				retryReporter.PublishFailure(ctx, errRetry)
+				helps.LogWithRequestID(ctx).Warnf(
+					"openai compat executor: progress-only retry failed; forwarding original response: %v",
+					errRetry,
+				)
+			}
+
+			if holdForProgressDecision && !emitBuffered() {
+				return
+			}
+			streamUsage.Publish(ctx, currentReporter)
+			currentReporter.EnsurePublished(ctx)
+			return
 		}
-		// Ensure we record the request if no usage chunk was ever seen.
-		streamUsage.Publish(ctx, reporter)
-		reporter.EnsurePublished(ctx)
 	}()
 	return &cliproxyexecutor.StreamResult{Headers: httpResp.Header.Clone(), Chunks: out}, nil
 }
@@ -913,6 +1081,48 @@ func (e *OpenAICompatExecutor) applyPromptCacheKey(ctx context.Context, auth *cl
 	}, "\x00")
 	promptCacheKey := uuid.NewSHA1(uuid.NameSpaceOID, []byte(identity)).String()
 	return helps.SetStringIfDifferent(translated, "prompt_cache_key", promptCacheKey), nil
+}
+
+func (e *OpenAICompatExecutor) applyResponsesChatFidelity(auth *cliproxyauth.Auth, from sdktranslator.Format, alt string, source, translated []byte) []byte {
+	if alt == "responses/compact" || !sourceFormatEqual(from, sdktranslator.FormatOpenAIResponse) {
+		return translated
+	}
+	compat := e.resolveCompatConfig(auth)
+	if compat == nil || !compat.ResponsesChatFidelity {
+		return translated
+	}
+	return helps.ApplyOpenAIResponsesChatFidelity(source, translated)
+}
+
+func (e *OpenAICompatExecutor) applyResponsesChatPhaseBridge(auth *cliproxyauth.Auth, from sdktranslator.Format, alt, modelName string, source, translated []byte) []byte {
+	if !e.responsesChatPhaseBridgeActive(auth, from, alt, modelName) {
+		return translated
+	}
+	return helps.ApplyOpenAIResponsesChatPhaseBridge(source, translated)
+}
+
+func (e *OpenAICompatExecutor) responsesChatPhaseBridgeActive(auth *cliproxyauth.Auth, from sdktranslator.Format, alt, modelName string) bool {
+	if alt == "responses/compact" || !sourceFormatEqual(from, sdktranslator.FormatOpenAIResponse) {
+		return false
+	}
+	compat := e.resolveCompatConfig(auth)
+	return compat != nil && openAICompatModelUsesResponsesChatPhaseBridge(compat, modelName)
+}
+
+func openAICompatModelUsesResponsesChatPhaseBridge(compat *config.OpenAICompatibility, modelName string) bool {
+	if compat == nil {
+		return false
+	}
+	modelName = strings.TrimSpace(modelName)
+	for _, model := range compat.Models {
+		if !model.ResponsesChatPhaseBridge {
+			continue
+		}
+		if strings.EqualFold(strings.TrimSpace(model.Name), modelName) || strings.EqualFold(strings.TrimSpace(model.Alias), modelName) {
+			return true
+		}
+	}
+	return false
 }
 
 func (e *OpenAICompatExecutor) resolveCredentials(auth *cliproxyauth.Auth) (baseURL, apiKey string) {

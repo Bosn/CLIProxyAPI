@@ -614,6 +614,7 @@ nonstream-keepalive-interval: 0
 #     prefix: "test" # optional: require calls like "test/kimi-k2" to target this provider's credentials
 #     base-url: "https://openrouter.ai/api/v1" # The base URL of the provider.
 #     support-prompt-cache-key: false # optional: derive prompt_cache_key for requests from all input protocols
+#     responses-chat-fidelity: false # optional: preserve supported Responses tool/JSON fields when forwarding to /chat/completions
 #     disable-cooling: false # optional provider override: true disables cooling, false enables it; omit to inherit global
 #     request-retry: 3 # optional per-provider override; 0 disables additional rounds; omit or set < 0 to inherit global
 #     request-scoped-errors: # optional: custom rules to classify upstream errors by status and body patterns
@@ -641,6 +642,7 @@ nonstream-keepalive-interval: 0
 #         alias: "kimi-k2"               # The alias used in the API.
 #         display-name: "Kimi K2"         # optional catalog display name
 #         max-context-length: 1048576    # optional: override Codex client context window metadata
+#         responses-chat-phase-bridge: false # optional: preserve Codex commentary/final phases through Chat Completions
 #         image: false                   # optional: set true to allow this model on /v1/images/generations and /v1/images/edits (not chat/responses image input)
 #         input-modalities: [text, image] # optional: declare /v1/chat/completions and /v1/responses multimodal input for Codex clients. Use [text] for upstreams that reject multimodal tool result content.
 #         output-modalities: [text]       # optional: declare output modalities when known

@@ -43,6 +43,9 @@ type oaiToResponsesState struct {
 	MsgItemAdded    map[int]bool // whether response.output_item.added emitted for message
 	MsgContentAdded map[int]bool // whether response.content_part.added emitted for message
 	MsgItemDone     map[int]bool // whether message done events were emitted
+	MsgPhase        map[int]string
+	MsgHasToolCall  map[int]bool
+	PhaseBridge     bool
 	// function item state
 	FuncItemAdded  map[string]bool
 	FuncItemCustom map[string]bool
@@ -77,6 +80,18 @@ func incompleteByFinishReason(reason string) ([]byte, bool) {
 	default:
 		return nil, false
 	}
+}
+
+func responseMessagePhase(st *oaiToResponsesState, index int, text string) string {
+	if st == nil || !st.PhaseBridge {
+		return ""
+	}
+	if phase := st.MsgPhase[index]; phase != "" {
+		return phase
+	}
+	phase := translatorcommon.OpenAIResponsesAssistantPhase(text, st.MsgHasToolCall[index])
+	st.MsgPhase[index] = phase
+	return phase
 }
 
 func buildResponsesCompletedEvent(st *oaiToResponsesState, requestRawJSON []byte, nextSeq func() int) []byte {
@@ -189,6 +204,9 @@ func buildResponsesCompletedEvent(st *oaiToResponsesState, requestRawJSON []byte
 			item, _ = sjson.SetBytes(item, "id", fmt.Sprintf("msg_%s_%d", st.ResponseID, i))
 			item, _ = sjson.SetBytes(item, "status", msgStatus)
 			item, _ = sjson.SetBytes(item, "content.0.text", txt)
+			if phase := responseMessagePhase(st, i, txt); phase != "" {
+				item, _ = sjson.SetBytes(item, "phase", phase)
+			}
 			outputItems = append(outputItems, completedOutputItem{index: st.MsgOutputIx[i], raw: item})
 		}
 	}
@@ -265,6 +283,9 @@ func ConvertOpenAIChatCompletionsResponseToOpenAIResponses(ctx context.Context, 
 			MsgItemAdded:    make(map[int]bool),
 			MsgContentAdded: make(map[int]bool),
 			MsgItemDone:     make(map[int]bool),
+			MsgPhase:        make(map[int]string),
+			MsgHasToolCall:  make(map[int]bool),
+			PhaseBridge:     translatorcommon.OpenAIResponsesChatPhaseBridgeEnabled(requestRawJSON),
 			FuncItemAdded:   make(map[string]bool),
 			FuncItemCustom:  make(map[string]bool),
 			FuncArgsDone:    make(map[string]bool),
@@ -416,6 +437,9 @@ func ConvertOpenAIChatCompletionsResponseToOpenAIResponses(ctx context.Context, 
 		st.MsgItemAdded = make(map[int]bool)
 		st.MsgContentAdded = make(map[int]bool)
 		st.MsgItemDone = make(map[int]bool)
+		st.MsgPhase = make(map[int]string)
+		st.MsgHasToolCall = make(map[int]bool)
+		st.PhaseBridge = translatorcommon.OpenAIResponsesChatPhaseBridgeEnabled(requestRawJSON)
 		st.FuncItemAdded = make(map[string]bool)
 		st.FuncItemCustom = make(map[string]bool)
 		st.FuncArgsDone = make(map[string]bool)
@@ -514,6 +538,9 @@ func ConvertOpenAIChatCompletionsResponseToOpenAIResponses(ctx context.Context, 
 		itemDone, _ = sjson.SetBytes(itemDone, "item.id", fmt.Sprintf("msg_%s_%d", st.ResponseID, idx))
 		itemDone, _ = sjson.SetBytes(itemDone, "item.status", msgStatus)
 		itemDone, _ = sjson.SetBytes(itemDone, "item.content.0.text", fullText)
+		if phase := responseMessagePhase(st, idx, fullText); phase != "" {
+			itemDone, _ = sjson.SetBytes(itemDone, "item.phase", phase)
+		}
 		out = append(out, emitRespEvent("response.output_item.done", itemDone))
 		st.MsgItemDone[idx] = true
 	}
@@ -726,6 +753,10 @@ func ConvertOpenAIChatCompletionsResponseToOpenAIResponses(ctx context.Context, 
 
 				// tool calls
 				if tcs := delta.Get("tool_calls"); tcs.Exists() && tcs.IsArray() && len(tcs.Array()) > 0 {
+					st.MsgHasToolCall[idx] = true
+					if st.PhaseBridge {
+						st.MsgPhase[idx] = "commentary"
+					}
 					if st.ReasoningID != "" {
 						stopReasoning(st.ReasoningBuf.String())
 						st.ReasoningBuf.Reset()
@@ -779,6 +810,7 @@ func ConvertOpenAIChatCompletionsResponseToOpenAIResponses(ctx context.Context, 
 func ConvertOpenAIChatCompletionsResponseToOpenAIResponsesNonStream(_ context.Context, _ string, originalRequestRawJSON, requestRawJSON, rawJSON []byte, _ *any) []byte {
 	root := gjson.ParseBytes(rawJSON)
 	requestForNamespace := pickRequestJSON(originalRequestRawJSON, requestRawJSON)
+	phaseBridge := translatorcommon.OpenAIResponsesChatPhaseBridgeEnabled(requestRawJSON)
 
 	finishReason := root.Get("choices.0.finish_reason").String()
 	incompleteDetails, isIncomplete := incompleteByFinishReason(finishReason)
@@ -915,6 +947,7 @@ func ConvertOpenAIChatCompletionsResponseToOpenAIResponsesNonStream(_ context.Co
 		choices.ForEach(func(_, choice gjson.Result) bool {
 			msg := choice.Get("message")
 			if msg.Exists() {
+				hasToolCalls := msg.Get("tool_calls").IsArray() && len(msg.Get("tool_calls").Array()) > 0
 				// Text message part
 				if c := msg.Get("content"); c.Exists() && c.String() != "" {
 					itemStatus := "completed"
@@ -925,6 +958,9 @@ func ConvertOpenAIChatCompletionsResponseToOpenAIResponsesNonStream(_ context.Co
 					item, _ = sjson.SetBytes(item, "id", fmt.Sprintf("msg_%s_%d", id, int(choice.Get("index").Int())))
 					item, _ = sjson.SetBytes(item, "status", itemStatus)
 					item, _ = sjson.SetBytes(item, "content.0.text", c.String())
+					if phaseBridge {
+						item, _ = sjson.SetBytes(item, "phase", translatorcommon.OpenAIResponsesAssistantPhase(c.String(), hasToolCalls))
+					}
 					outputItems = append(outputItems, item)
 				}
 

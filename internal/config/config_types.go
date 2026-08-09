@@ -675,6 +675,9 @@ type OpenAICompatibility struct {
 	// SupportPromptCacheKey enables derived prompt_cache_key injection for supported requests.
 	SupportPromptCacheKey bool `yaml:"support-prompt-cache-key,omitempty" json:"support-prompt-cache-key,omitempty"`
 
+// ResponsesChatFidelity preserves supported OpenAI Responses request fields when forwarding through Chat Completions.
+	ResponsesChatFidelity bool `yaml:"responses-chat-fidelity,omitempty" json:"responses-chat-fidelity,omitempty"`
+
 	// DisableCooling overrides the global cooling policy for this provider when set.
 	// True disables auth/model cooldowns; false explicitly enables them.
 	DisableCooling *bool `yaml:"disable-cooling,omitempty" json:"disable-cooling,omitempty"`
@@ -731,6 +734,9 @@ type OpenAICompatibilityModel struct {
 	// IsCompat preserves Claude thinking blocks for compatible upstreams.
 	// Default false keeps the normal signature validation behavior.
 	IsCompat bool `yaml:"is-compat,omitempty" json:"is-compat,omitempty"`
+
+	// ResponsesChatPhaseBridge preserves assistant phase semantics when Responses requests are forwarded through Chat Completions.
+	ResponsesChatPhaseBridge bool `yaml:"responses-chat-phase-bridge,omitempty" json:"responses-chat-phase-bridge,omitempty"`
 
 	// Thinking configures the thinking/reasoning capability for this model.
 	// If nil, the model defaults to level-based reasoning with levels ["low", "medium", "high"].
