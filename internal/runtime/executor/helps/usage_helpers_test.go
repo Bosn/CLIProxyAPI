@@ -6,11 +6,13 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/http/httptest"
 	"net/url"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/gin-gonic/gin"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/clienterror"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/usage"
@@ -732,6 +734,58 @@ func TestUsageReporterBuildRecordIncludesRequestedModelAlias(t *testing.T) {
 	}
 	if record.Alias != "client-gpt" {
 		t.Fatalf("alias = %q, want %q", record.Alias, "client-gpt")
+	}
+}
+
+func TestUsageReporterCapturesBoundedTraceCorrelationBeforeGinReuse(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	ginCtx, _ := gin.CreateTestContext(httptest.NewRecorder())
+	ginCtx.Request = httptest.NewRequest(http.MethodPost, "/v1/responses", strings.NewReader(`{"input":"secret prompt"}`))
+	ginCtx.Request.Header.Set("traceparent", "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01")
+	ctx := context.WithValue(context.Background(), "gin", ginCtx)
+	reporter := NewUsageReporter(ctx, "openai", "gpt-5.4", nil)
+
+	// Gin contexts can be recycled after the request. The usage record must keep
+	// only the already-projected correlation and never read the later header.
+	ginCtx.Request.Header.Set("traceparent", "00-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-bbbbbbbbbbbbbbbb-01")
+	record := reporter.buildRecord(usage.Detail{TotalTokens: 3}, false)
+	if record.CorrelationID != "4bf92f3577b34da6a3ce929d" {
+		t.Fatalf("correlation ID = %q, want trace prefix", record.CorrelationID)
+	}
+	if record.SampleID != "s_fa06bc2a006f4aae713c93cd23bffef3" {
+		t.Fatalf("sample ID = %q, want stable full-trace projection", record.SampleID)
+	}
+}
+
+func TestInteractionCorrelationRejectsMalformedTraceparents(t *testing.T) {
+	tests := []string{
+		"",
+		"00-00000000000000000000000000000000-00f067aa0ba902b7-01",
+		"00-4bf92f3577b34da6a3ce929d0e0e4736-0000000000000000-01",
+		"00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-zz",
+		"00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01-extra",
+		" 00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01",
+		"00-4BF92F3577B34DA6A3CE929D0E0E4736-00f067aa0ba902b7-01",
+	}
+	for _, value := range tests {
+		if got := interactionCorrelationIDFromTraceparent(value); got != "" {
+			t.Fatalf("traceparent %q produced correlation %q", value, got)
+		}
+	}
+}
+
+func TestInteractionTraceProjectionDistinguishesRetrySpans(t *testing.T) {
+	correlationA, sampleA := interactionTraceProjectionFromTraceparent(
+		"00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01",
+	)
+	correlationB, sampleB := interactionTraceProjectionFromTraceparent(
+		"00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b8-01",
+	)
+	if correlationA == "" || correlationA != correlationB {
+		t.Fatalf("retry correlation mismatch: %q vs %q", correlationA, correlationB)
+	}
+	if sampleA == "" || sampleA == sampleB {
+		t.Fatalf("retry sample IDs must differ: %q vs %q", sampleA, sampleB)
 	}
 }
 

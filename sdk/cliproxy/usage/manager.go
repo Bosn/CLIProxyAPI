@@ -41,6 +41,13 @@ type Record struct {
 	RequestServiceTier string
 	// ResponseServiceTier stores the final tier reported by the upstream response.
 	ResponseServiceTier string
+	// CorrelationID is a bounded, payload-free interaction identifier propagated
+	// from a validated W3C traceparent.
+	CorrelationID string
+	// SampleID is a one-way identifier for one provider attempt. Retries within
+	// the same interaction have distinct sample IDs because the W3C span ID is
+	// included in the projection.
+	SampleID string
 	// Generate reports whether the client requested actual generation.
 	// nil or true means generation is enabled; only an explicit false disables generation.
 	// Use GenerateFlag to set the value and GenerateEnabled to read it with the default.

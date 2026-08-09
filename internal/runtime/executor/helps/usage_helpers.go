@@ -3,6 +3,8 @@ package helps
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
@@ -37,6 +39,8 @@ type UsageReporter struct {
 	source              string
 	reasoning           string
 	serviceTier         string
+	correlationID       string
+	sampleID            string
 	generate            bool
 	stream              bool
 	requestedAt         time.Time
@@ -69,18 +73,21 @@ func NewUsageReporter(ctx context.Context, provider, model string, auth *cliprox
 	if alias == "" {
 		alias = model
 	}
+	correlationID, sampleID := interactionTraceProjectionFromContext(ctx)
 	reporter := &UsageReporter{
-		provider:    provider,
-		model:       model,
-		alias:       strings.TrimSpace(alias),
-		requestedAt: time.Now(),
-		apiKey:      apiKey,
-		source:      resolveUsageSource(auth, apiKey),
-		authType:    resolveUsageAuthType(auth),
-		reasoning:   usage.ReasoningEffortFromContext(ctx),
-		serviceTier: usage.ServiceTierFromContext(ctx),
-		generate:    usage.GenerateFromContext(ctx),
-		stream:      usage.StreamFromContext(ctx),
+		provider:      provider,
+		model:         model,
+		alias:         strings.TrimSpace(alias),
+		requestedAt:   time.Now(),
+		apiKey:        apiKey,
+		source:        resolveUsageSource(auth, apiKey),
+		authType:      resolveUsageAuthType(auth),
+		reasoning:     usage.ReasoningEffortFromContext(ctx),
+		serviceTier:   usage.ServiceTierFromContext(ctx),
+		correlationID: correlationID,
+		sampleID:      sampleID,
+		generate:      usage.GenerateFromContext(ctx),
+		stream:        usage.StreamFromContext(ctx),
 	}
 	if auth != nil {
 		reporter.authID = auth.ID
@@ -400,6 +407,8 @@ func (r *UsageReporter) buildRecordForModel(model string, detail usage.Detail, f
 		ReasoningEffort:     r.reasoning,
 		ServiceTier:         r.serviceTier,
 		ResponseServiceTier: strings.TrimSpace(detail.ResponseServiceTier),
+		CorrelationID:       r.correlationID,
+		SampleID:            r.sampleID,
 		Generate:            usage.GenerateFlag(r.generate),
 		Stream:              r.stream,
 		RequestedAt:         r.requestedAt,
@@ -535,6 +544,57 @@ func APIKeyFromContext(ctx context.Context) string {
 		}
 	}
 	return ""
+}
+
+func interactionTraceProjectionFromContext(ctx context.Context) (string, string) {
+	if ctx == nil {
+		return "", ""
+	}
+	ginCtx, ok := ctx.Value("gin").(*gin.Context)
+	if !ok || ginCtx == nil || ginCtx.Request == nil {
+		return "", ""
+	}
+	return interactionTraceProjectionFromTraceparent(ginCtx.Request.Header.Get("traceparent"))
+}
+
+func interactionCorrelationIDFromTraceparent(value string) string {
+	correlationID, _ := interactionTraceProjectionFromTraceparent(value)
+	return correlationID
+}
+
+func interactionTraceProjectionFromTraceparent(value string) (string, string) {
+	if len(value) != 55 || strings.TrimSpace(value) != value || strings.ToLower(value) != value {
+		return "", ""
+	}
+	parts := strings.Split(value, "-")
+	if len(parts) != 4 || parts[0] != "00" || len(parts[1]) != 32 || len(parts[2]) != 16 || len(parts[3]) != 2 {
+		return "", ""
+	}
+	traceID, errTrace := hex.DecodeString(parts[1])
+	spanID, errSpan := hex.DecodeString(parts[2])
+	if errTrace != nil || errSpan != nil {
+		return "", ""
+	}
+	if allZeroBytes(traceID) || allZeroBytes(spanID) {
+		return "", ""
+	}
+	if _, errFlags := hex.DecodeString(parts[3]); errFlags != nil {
+		return "", ""
+	}
+	digest := sha256.Sum256([]byte("cliproxyapi.ttft.sample/v1\x00" + value))
+	return parts[1][:24], "s_" + hex.EncodeToString(digest[:16])
+}
+
+func allZeroBytes(value []byte) bool {
+	if len(value) == 0 {
+		return true
+	}
+	for _, item := range value {
+		if item != 0 {
+			return false
+		}
+	}
+	return true
 }
 
 func resolveUsageSource(auth *cliproxyauth.Auth, ctxAPIKey string) string {
