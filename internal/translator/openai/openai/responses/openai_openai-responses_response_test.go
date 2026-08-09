@@ -5,7 +5,9 @@ import (
 	"strings"
 	"testing"
 
+	translatorcommon "github.com/router-for-me/CLIProxyAPI/v7/internal/translator/common"
 	"github.com/tidwall/gjson"
+	"github.com/tidwall/sjson"
 )
 
 func parseOpenAIResponsesSSEEvent(t *testing.T, chunk []byte) (string, gjson.Result) {
@@ -22,6 +24,94 @@ func parseOpenAIResponsesSSEEvent(t *testing.T, chunk []byte) (string, gjson.Res
 		t.Fatalf("invalid SSE data JSON: %q", dataLine)
 	}
 	return event, gjson.Parse(dataLine)
+}
+
+func TestConvertOpenAIChatCompletionsResponseToOpenAIResponses_PhaseBridge(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name  string
+		text  string
+		lines []string
+		want  string
+	}{
+		{
+			name: "progress-only text becomes commentary",
+			text: "No listener on 417x. Let me check the publisher state and what last got published.",
+			lines: []string{
+				`data: {"id":"resp_progress","object":"chat.completion.chunk","created":1773896263,"choices":[{"index":0,"delta":{"role":"assistant","content":"No listener on 417x. Let me check "},"finish_reason":null}]}`,
+				`data: {"id":"resp_progress","object":"chat.completion.chunk","created":1773896263,"choices":[{"index":0,"delta":{"content":"the publisher state and what last got published."},"finish_reason":"stop"}]}`,
+				`data: [DONE]`,
+			},
+			want: "commentary",
+		},
+		{
+			name: "completed text becomes final answer",
+			text: "Root cause: the compiled Viewer was never released.",
+			lines: []string{
+				`data: {"id":"resp_final","object":"chat.completion.chunk","created":1773896263,"choices":[{"index":0,"delta":{"role":"assistant","content":"Root cause: the compiled Viewer was never released."},"finish_reason":"stop"}]}`,
+				`data: [DONE]`,
+			},
+			want: "final_answer",
+		},
+		{
+			name: "text alongside tool call becomes commentary",
+			text: "Checking the live state now.",
+			lines: []string{
+				`data: {"id":"resp_tool","object":"chat.completion.chunk","created":1773896263,"choices":[{"index":0,"delta":{"role":"assistant","content":"Checking the live state now."},"finish_reason":null}]}`,
+				`data: {"id":"resp_tool","object":"chat.completion.chunk","created":1773896263,"choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":"call_1","type":"function","function":{"name":"lookup","arguments":"{}"}}]},"finish_reason":"tool_calls"}]}`,
+				`data: [DONE]`,
+			},
+			want: "commentary",
+		},
+	}
+
+	chatRequest := translatorcommon.MarkOpenAIResponsesChatPhaseBridge([]byte(`{"messages":[{"role":"system","content":"phase contract"}]}`))
+	responsesRequest := []byte(`{"model":"qwen3.8-max","input":"test"}`)
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			var param any
+			var donePhase string
+			var completedPhase string
+			var completedText string
+			for _, line := range test.lines {
+				chunks := ConvertOpenAIChatCompletionsResponseToOpenAIResponses(context.Background(), "qwen3.8-max", responsesRequest, chatRequest, []byte(line), &param)
+				for _, chunk := range chunks {
+					event, data := parseOpenAIResponsesSSEEvent(t, chunk)
+					switch event {
+					case "response.output_item.done":
+						if data.Get("item.type").String() == "message" {
+							donePhase = data.Get("item.phase").String()
+						}
+					case "response.completed":
+						for _, item := range data.Get("response.output").Array() {
+							if item.Get("type").String() == "message" {
+								completedPhase = item.Get("phase").String()
+								completedText = item.Get("content.0.text").String()
+							}
+						}
+					}
+				}
+			}
+			if donePhase != test.want || completedPhase != test.want {
+				t.Fatalf("phases = done %q completed %q, want %q", donePhase, completedPhase, test.want)
+			}
+			if completedText != test.text {
+				t.Fatalf("completed text = %q, want %q", completedText, test.text)
+			}
+		})
+	}
+}
+
+func TestConvertOpenAIChatCompletionsResponseToOpenAIResponsesNonStream_PhaseBridge(t *testing.T) {
+	t.Parallel()
+	responsesRequest := []byte(`{"model":"qwen3.8-max","input":"test"}`)
+	chatRequest := translatorcommon.MarkOpenAIResponsesChatPhaseBridge([]byte(`{"messages":[{"role":"system","content":"phase contract"}]}`))
+	raw := []byte(`{"id":"chatcmpl_1","object":"chat.completion","created":1773896263,"choices":[{"index":0,"message":{"role":"assistant","content":"I've traced the flow. Now I'll check the upstream behavior."},"finish_reason":"stop"}]}`)
+
+	resp := ConvertOpenAIChatCompletionsResponseToOpenAIResponsesNonStream(context.Background(), "qwen3.8-max", responsesRequest, chatRequest, raw, nil)
+	if phase := gjson.GetBytes(resp, "output.0.phase").String(); phase != "commentary" {
+		t.Fatalf("phase = %q, want commentary; response=%s", phase, resp)
+	}
 }
 
 func TestConvertOpenAIChatCompletionsResponseToOpenAIResponses_ResponseCompletedWaitsForDone(t *testing.T) {
@@ -503,6 +593,57 @@ func TestConvertOpenAIChatCompletionsResponseToOpenAIResponses_CompletedOmitsTop
 	}
 	if got := completed.Get("response.output.0.content.0.text").String(); got != "hello world" {
 		t.Fatalf("response.output text = %q, want %q", got, "hello world")
+	}
+}
+
+func TestConvertOpenAIChatCompletionsResponseToOpenAIResponses_StreamingRoundTripKeepsCombinedAssistantTurn(t *testing.T) {
+	in := []string{
+		`data: {"id":"resp_round_trip","object":"chat.completion.chunk","created":1,"model":"qwen3.8-max","choices":[{"index":0,"delta":{"role":"assistant","reasoning_content":"inspect the next step","content":null},"finish_reason":null}]}`,
+		`data: {"id":"resp_round_trip","object":"chat.completion.chunk","created":1,"model":"qwen3.8-max","choices":[{"index":0,"delta":{"role":"assistant","content":"Step 1 completed; continue to step 2."},"finish_reason":null}]}`,
+		`data: {"id":"resp_round_trip","object":"chat.completion.chunk","created":1,"model":"qwen3.8-max","choices":[{"index":0,"delta":{"role":"assistant","tool_calls":[{"index":0,"id":"call_1","type":"function","function":{"name":"exec_command","arguments":""}}]},"finish_reason":null}]}`,
+		`data: {"id":"resp_round_trip","object":"chat.completion.chunk","created":1,"model":"qwen3.8-max","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"function":{"arguments":"{\"cmd\":\"printf step-2\"}"}}]},"finish_reason":"tool_calls"}],"usage":{"prompt_tokens":10,"completion_tokens":5,"total_tokens":15}}`,
+		`data: [DONE]`,
+	}
+	request := []byte(`{"model":"qwen3.8-max","reasoning":{"effort":"max"}}`)
+
+	var param any
+	var completed gjson.Result
+	for _, line := range in {
+		for _, chunk := range ConvertOpenAIChatCompletionsResponseToOpenAIResponses(context.Background(), "qwen3.8-max", request, request, []byte(line), &param) {
+			event, data := parseOpenAIResponsesSSEEvent(t, chunk)
+			if event == "response.completed" {
+				completed = data
+			}
+		}
+	}
+	if !completed.Exists() {
+		t.Fatal("expected response.completed event")
+	}
+
+	nextRequest := []byte(`{"model":"qwen3.8-max","input":[]}`)
+	var err error
+	nextRequest, err = sjson.SetRawBytes(nextRequest, "input", []byte(completed.Get("response.output").Raw))
+	if err != nil {
+		t.Fatalf("set Responses output history: %v", err)
+	}
+	nextRequest, err = sjson.SetRawBytes(nextRequest, "input.-1", []byte(`{"type":"function_call_output","call_id":"call_1","output":"step-2"}`))
+	if err != nil {
+		t.Fatalf("append function call output: %v", err)
+	}
+
+	roundTripped := ConvertOpenAIResponsesRequestToOpenAIChatCompletions("qwen3.8-max", nextRequest, true)
+	if got := gjson.GetBytes(roundTripped, "messages.#").Int(); got != 2 {
+		t.Fatalf("messages count after streaming round-trip = %d, want 2; output=%s", got, roundTripped)
+	}
+	assistant := gjson.GetBytes(roundTripped, "messages.0")
+	if got := assistant.Get("content.0.text").String(); got != "Step 1 completed; continue to step 2." {
+		t.Fatalf("assistant content = %q; output=%s", got, roundTripped)
+	}
+	if got := assistant.Get("reasoning_content").String(); got != "inspect the next step" {
+		t.Fatalf("assistant reasoning_content = %q; output=%s", got, roundTripped)
+	}
+	if got := assistant.Get("tool_calls.0.id").String(); got != "call_1" {
+		t.Fatalf("assistant tool call id = %q; output=%s", got, roundTripped)
 	}
 }
 

@@ -89,6 +89,9 @@ func describeOpenAICompatibilityUpdate(oldEntry, newEntry config.OpenAICompatibi
 	if !optionalIntEqual(oldEntry.RequestRetry, newEntry.RequestRetry) {
 		details = append(details, fmt.Sprintf("request-retry %s -> %s", formatOptionalInt(oldEntry.RequestRetry), formatOptionalInt(newEntry.RequestRetry)))
 	}
+	if oldEntry.ResponsesChatFidelity != newEntry.ResponsesChatFidelity {
+		details = append(details, fmt.Sprintf("responses-chat-fidelity %t -> %t", oldEntry.ResponsesChatFidelity, newEntry.ResponsesChatFidelity))
+	}
 	if oldKeyCount != newKeyCount {
 		details = append(details, fmt.Sprintf("api-keys %d -> %d", oldKeyCount, newKeyCount))
 	}
@@ -191,6 +194,9 @@ func openAICompatSignature(entry config.OpenAICompatibility) string {
 			sort.Strings(keys)
 			parts = append(parts, "headers="+strings.Join(keys, ","))
 		}
+	}
+	if entry.ResponsesChatFidelity {
+		parts = append(parts, "responses_chat_fidelity=true")
 	}
 
 	// Intentionally exclude API key material; only count non-empty entries.

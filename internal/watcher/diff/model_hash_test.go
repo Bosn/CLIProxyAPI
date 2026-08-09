@@ -37,6 +37,51 @@ func TestComputeOpenAICompatModelsHash_IncludesImageFlag(t *testing.T) {
 	}
 }
 
+func TestComputeModelHashesIncludeMaxContextLength(t *testing.T) {
+	tests := []struct {
+		name    string
+		base    string
+		changed string
+	}{
+		{
+			name:    "openai compatibility",
+			base:    ComputeOpenAICompatModelsHash([]config.OpenAICompatibilityModel{{Name: "model", MaxContextLength: 272000}}),
+			changed: ComputeOpenAICompatModelsHash([]config.OpenAICompatibilityModel{{Name: "model", MaxContextLength: 1_000_000}}),
+		},
+		{
+			name:    "claude",
+			base:    ComputeClaudeModelsHash([]config.ClaudeModel{{Name: "model", MaxContextLength: 272000}}),
+			changed: ComputeClaudeModelsHash([]config.ClaudeModel{{Name: "model", MaxContextLength: 1_000_000}}),
+		},
+		{
+			name:    "codex",
+			base:    ComputeCodexModelsHash([]config.CodexModel{{Name: "model", MaxContextLength: 272000}}),
+			changed: ComputeCodexModelsHash([]config.CodexModel{{Name: "model", MaxContextLength: 1_000_000}}),
+		},
+		{
+			name:    "gemini",
+			base:    ComputeGeminiModelsHash([]config.GeminiModel{{Name: "model", MaxContextLength: 272000}}),
+			changed: ComputeGeminiModelsHash([]config.GeminiModel{{Name: "model", MaxContextLength: 1_000_000}}),
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			if test.base == "" || test.base == test.changed {
+				t.Fatalf("max-context-length must change model hash: %q / %q", test.base, test.changed)
+			}
+		})
+	}
+}
+
+func TestComputeOpenAICompatModelsHashIncludesResponsesChatPhaseBridge(t *testing.T) {
+	base := ComputeOpenAICompatModelsHash([]config.OpenAICompatibilityModel{{Name: "model"}})
+	changed := ComputeOpenAICompatModelsHash([]config.OpenAICompatibilityModel{{Name: "model", ResponsesChatPhaseBridge: true}})
+	if base == changed {
+		t.Fatal("expected responses-chat-phase-bridge change to affect model hash")
+	}
+}
+
 func TestComputeOpenAICompatModelsHashIncludesModalities(t *testing.T) {
 	base := []config.OpenAICompatibilityModel{{Name: "model", InputModalities: []string{"text"}, OutputModalities: []string{"text"}}}
 	inputChanged := []config.OpenAICompatibilityModel{{Name: "model", InputModalities: []string{"text", "image"}, OutputModalities: []string{"text"}}}
