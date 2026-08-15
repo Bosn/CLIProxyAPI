@@ -457,6 +457,17 @@ func (e *OpenAICompatExecutor) ExecuteStream(ctx context.Context, auth *cliproxy
 			var upstreamEvent string
 			var frameData [][]byte
 			var progressGuard helps.OpenAIResponsesChatProgressGuard
+			attemptReporter := currentReporter
+			usagePublished := false
+			publishAttemptUsage := func() {
+				if usagePublished {
+					return
+				}
+				streamUsage.Publish(ctx, attemptReporter)
+				attemptReporter.EnsurePublished(ctx)
+				usagePublished = true
+			}
+			defer publishAttemptUsage()
 			holdForProgressDecision := progressGuardEnabled && attempt == 0
 			bufferedFrames := make([][]byte, 0)
 			bufferedBytes := 0
@@ -662,8 +673,7 @@ func (e *OpenAICompatExecutor) ExecuteStream(ctx context.Context, auth *cliproxy
 				helps.LogWithRequestID(ctx).Warn(
 					"openai compat executor: retrying progress-only response before downstream emission",
 				)
-				streamUsage.Publish(ctx, currentReporter)
-				currentReporter.EnsurePublished(ctx)
+				publishAttemptUsage()
 
 				retryTranslated := helps.ApplyOpenAIResponsesChatProgressRetryInstruction(currentTranslated)
 				retryReporter := helps.NewExecutorUsageReporter(ctx, e, baseModel, auth)
@@ -730,8 +740,7 @@ func (e *OpenAICompatExecutor) ExecuteStream(ctx context.Context, auth *cliproxy
 			if holdForProgressDecision && !emitBuffered() {
 				return
 			}
-			streamUsage.Publish(ctx, currentReporter)
-			currentReporter.EnsurePublished(ctx)
+			publishAttemptUsage()
 			return
 		}
 	}()

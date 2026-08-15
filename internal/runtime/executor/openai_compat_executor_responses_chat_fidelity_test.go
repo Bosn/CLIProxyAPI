@@ -9,11 +9,13 @@ import (
 	"strings"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/runtime/executor/helps"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
+	"github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/usage"
 	sdktranslator "github.com/router-for-me/CLIProxyAPI/v7/sdk/translator"
 	"github.com/tidwall/gjson"
 )
@@ -120,6 +122,77 @@ func TestOpenAICompatExecutorResponsesChatFidelity(t *testing.T) {
 			assertExecutorJSONBool(t, gotBody, "response_format.json_schema.strict", false)
 			assertExecutorJSONBool(t, gotBody, "tools.0.function.strict", false)
 		})
+	}
+}
+
+func TestOpenAICompatExecutorPublishesObservedUsageWhenStreamConsumerCancels(t *testing.T) {
+	const model = "usage-cancel-model"
+
+	wroteFrame := make(chan struct{})
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = w.Write([]byte(`data: {"id":"chatcmpl_usage","object":"chat.completion.chunk","created":1,"model":"usage-cancel-model","choices":[{"index":0,"delta":{"role":"assistant","content":"partial"},"finish_reason":null}],"usage":{"prompt_tokens":2,"completion_tokens":3,"total_tokens":5}}` + "\n\n"))
+		if flusher, ok := w.(http.Flusher); ok {
+			flusher.Flush()
+		}
+		close(wroteFrame)
+		<-r.Context().Done()
+	}))
+	defer server.Close()
+
+	plugin := &captureOpenAICompatUsagePlugin{
+		model:   model,
+		records: make(chan usage.Record, 1),
+	}
+	usage.RegisterNamedPlugin("openai-compat-cancelled-stream-test", plugin)
+
+	executor := NewOpenAICompatExecutor("openai-compatibility", &config.Config{})
+	auth := &cliproxyauth.Auth{Attributes: map[string]string{
+		"base_url": server.URL + "/v1",
+		"api_key":  "test",
+	}}
+	request := []byte(`{"model":"usage-cancel-model","input":"hi","stream":true}`)
+	ctx, cancel := context.WithCancel(context.Background())
+	result, errExecute := executor.ExecuteStream(ctx, auth, cliproxyexecutor.Request{
+		Model: model, Payload: request,
+	}, cliproxyexecutor.Options{
+		SourceFormat:    sdktranslator.FormatOpenAIResponse,
+		ResponseFormat:  sdktranslator.FormatOpenAIResponse,
+		OriginalRequest: request,
+		Stream:          true,
+	})
+	if errExecute != nil {
+		cancel()
+		t.Fatalf("ExecuteStream error: %v", errExecute)
+	}
+
+	<-wroteFrame
+	cancel()
+	for range result.Chunks {
+	}
+
+	select {
+	case record := <-plugin.records:
+		if record.Detail.InputTokens != 2 || record.Detail.OutputTokens != 3 || record.Detail.TotalTokens != 5 {
+			t.Fatalf("usage detail = %+v, want input=2 output=3 total=5", record.Detail)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for cancelled stream usage record")
+	}
+}
+
+type captureOpenAICompatUsagePlugin struct {
+	model   string
+	records chan usage.Record
+}
+
+func (p *captureOpenAICompatUsagePlugin) HandleUsage(_ context.Context, record usage.Record) {
+	if record.Provider != "openai-compatibility" || record.Model != p.model {
+		return
+	}
+	select {
+	case p.records <- record:
+	default:
 	}
 }
 
