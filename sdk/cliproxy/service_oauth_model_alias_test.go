@@ -37,7 +37,7 @@ func TestApplyOAuthModelAlias_ForkAddsAlias(t *testing.T) {
 	cfg := &config.Config{
 		OAuthModelAlias: map[string][]config.OAuthModelAlias{
 			"codex": {
-				{Name: "gpt-5", Alias: "g5", Fork: true, DisplayName: "Configured GPT Five"},
+				{Name: "gpt-5", Alias: "g5", Fork: true, DisplayName: "Configured GPT Five", MaxContextLength: 947369},
 			},
 		},
 	}
@@ -63,6 +63,12 @@ func TestApplyOAuthModelAlias_ForkAddsAlias(t *testing.T) {
 	}
 	if out[1].DisplayName != "Configured GPT Five" {
 		t.Fatalf("expected alias display name %q, got %q", "Configured GPT Five", out[1].DisplayName)
+	}
+	if out[0].ContextLength != 0 || out[0].MaxContextLength != 0 {
+		t.Fatalf("expected original context metadata to remain unchanged, got context=%d max=%d", out[0].ContextLength, out[0].MaxContextLength)
+	}
+	if out[1].ContextLength != 947369 || out[1].MaxContextLength != 947369 {
+		t.Fatalf("expected alias context metadata 947369, got context=%d max=%d", out[1].ContextLength, out[1].MaxContextLength)
 	}
 }
 
