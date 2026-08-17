@@ -37,12 +37,12 @@ func TestApplyOAuthModelAlias_ForkAddsAlias(t *testing.T) {
 	cfg := &config.Config{
 		OAuthModelAlias: map[string][]config.OAuthModelAlias{
 			"codex": {
-				{Name: "gpt-5", Alias: "g5", Fork: true, DisplayName: "Configured GPT Five", MaxContextLength: 947369},
+				{Name: "gpt-5", Alias: "g5", Fork: true, DisplayName: "Configured GPT Five", MaxContextLength: 947369, SourceMaxContextLength: 372000},
 			},
 		},
 	}
 	models := []*ModelInfo{
-		{ID: "gpt-5", Name: "models/gpt-5", DisplayName: "Upstream GPT Five"},
+		{ID: "gpt-5", Name: "models/gpt-5", DisplayName: "Upstream GPT Five", ContextLength: 921000, MaxContextLength: 921000},
 	}
 
 	out := applyOAuthModelAlias(cfg, "codex", "oauth", models)
@@ -64,11 +64,14 @@ func TestApplyOAuthModelAlias_ForkAddsAlias(t *testing.T) {
 	if out[1].DisplayName != "Configured GPT Five" {
 		t.Fatalf("expected alias display name %q, got %q", "Configured GPT Five", out[1].DisplayName)
 	}
-	if out[0].ContextLength != 0 || out[0].MaxContextLength != 0 {
-		t.Fatalf("expected original context metadata to remain unchanged, got context=%d max=%d", out[0].ContextLength, out[0].MaxContextLength)
+	if out[0].ContextLength != 372000 || out[0].MaxContextLength != 372000 {
+		t.Fatalf("expected retained source context metadata 372000, got context=%d max=%d", out[0].ContextLength, out[0].MaxContextLength)
 	}
 	if out[1].ContextLength != 947369 || out[1].MaxContextLength != 947369 {
 		t.Fatalf("expected alias context metadata 947369, got context=%d max=%d", out[1].ContextLength, out[1].MaxContextLength)
+	}
+	if models[0].ContextLength != 921000 || models[0].MaxContextLength != 921000 {
+		t.Fatalf("expected upstream model metadata to remain immutable, got context=%d max=%d", models[0].ContextLength, models[0].MaxContextLength)
 	}
 }
 
