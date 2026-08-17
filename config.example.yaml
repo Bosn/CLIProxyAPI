@@ -700,6 +700,7 @@ nonstream-keepalive-interval: 0
 #   fork: true                  # keep the upstream model and also expose the alias as a separate client-visible model
 #   display-name: "Model Name" # override the human-readable name shown in model catalogs
 #   max-context-length: 1000000 # override the context window advertised for this alias only
+#   source-max-context-length: 372000 # when fork is true, override the retained upstream model's advertised context window
 #   force-mapping: true         # rewrite upstream response model fields back to the client-visible alias (example below uses antigravity only)
 # Per-auth OAuth aliases can also be stored in an OAuth auth JSON file as "model_aliases".
 # Legacy "model-aliases" credentials remain supported and are normalized at load time.

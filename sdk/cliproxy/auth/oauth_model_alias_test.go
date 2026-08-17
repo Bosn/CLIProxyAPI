@@ -317,6 +317,27 @@ func TestApplyOAuthModelAlias_PluginProvider(t *testing.T) {
 	}
 }
 
+func TestApplyOAuthModelAlias_LargeContextUsesSolUpstream(t *testing.T) {
+	t.Parallel()
+
+	mgr := NewManager(nil, nil, nil)
+	mgr.SetConfig(&internalconfig.Config{})
+	mgr.SetOAuthModelAlias(map[string][]internalconfig.OAuthModelAlias{
+		"codex": {{
+			Name:                   "gpt-5.6-sol",
+			Alias:                  "gpt-5.6-sol-large-context",
+			Fork:                   true,
+			MaxContextLength:       947369,
+			SourceMaxContextLength: 372000,
+		}},
+	})
+
+	auth := &Auth{ID: "codex-auth-id", Provider: "codex", Attributes: map[string]string{"auth_kind": "oauth"}}
+	if got := mgr.applyOAuthModelAlias(auth, "gpt-5.6-sol-large-context"); got != "gpt-5.6-sol" {
+		t.Fatalf("large-context route = %q, want gpt-5.6-sol", got)
+	}
+}
+
 func TestApplyOAuthModelAlias_PluginProviderSkipsAPIKey(t *testing.T) {
 	t.Parallel()
 

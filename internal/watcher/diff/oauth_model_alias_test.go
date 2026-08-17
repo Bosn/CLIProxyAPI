@@ -43,3 +43,22 @@ func TestDiffOAuthModelAliasChanges_IncludesMaxContextLength(t *testing.T) {
 		t.Fatalf("expected codex to be affected, got %#v", affected)
 	}
 }
+
+func TestDiffOAuthModelAliasChanges_IncludesSourceMaxContextLength(t *testing.T) {
+	oldMap := map[string][]config.OAuthModelAlias{
+		"codex": {
+			{Name: "gpt-5.6-sol", Alias: "gpt-5.6-sol-large-context", Fork: true, SourceMaxContextLength: 921000},
+		},
+	}
+	newMap := map[string][]config.OAuthModelAlias{
+		"codex": {
+			{Name: "gpt-5.6-sol", Alias: "gpt-5.6-sol-large-context", Fork: true, SourceMaxContextLength: 372000},
+		},
+	}
+
+	changes, affected := DiffOAuthModelAliasChanges(oldMap, newMap)
+	expectContains(t, changes, "oauth-model-alias[codex]: updated (1 -> 1 entries)")
+	if len(affected) != 1 || affected[0] != "codex" {
+		t.Fatalf("expected codex to be affected, got %#v", affected)
+	}
+}

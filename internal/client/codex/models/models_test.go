@@ -424,6 +424,37 @@ func TestCodexClientModelsResponseAppliesMaxContextLengthOverride(t *testing.T) 
 	}
 }
 
+func TestCodexClientModelsResponseKeepsBaseAndLargeContextLimitsDistinct(t *testing.T) {
+	resp := BuildResponse([]map[string]any{
+		{"id": "gpt-5.6-sol", "max_context_length": 372000},
+		{"id": "gpt-5.6-sol-large-context", "max_context_length": 947369},
+	}, nil, false)
+	models, ok := resp["models"].([]map[string]any)
+	if !ok {
+		t.Fatalf("models type = %T, want []map[string]any", resp["models"])
+	}
+
+	bySlug := make(map[string]map[string]any, len(models))
+	for _, model := range models {
+		bySlug[stringModelValue(model, "slug")] = model
+	}
+	for slug, want := range map[string]int{
+		"gpt-5.6-sol":               372000,
+		"gpt-5.6-sol-large-context": 947369,
+	} {
+		entry := bySlug[slug]
+		if entry == nil {
+			t.Fatalf("missing model %q", slug)
+		}
+		if got := intModelValue(entry, "context_window"); got != want {
+			t.Errorf("%s context_window = %d, want %d", slug, got, want)
+		}
+		if got := intModelValue(entry, "max_context_window"); got != want {
+			t.Errorf("%s max_context_window = %d, want %d", slug, got, want)
+		}
+	}
+}
+
 func TestCodexClientModelsResponseMapsMaxCompletionTokensToMaxTokens(t *testing.T) {
 	const wantTemplateLimit = 64000
 	const wantSynthesizedLimit = 32000

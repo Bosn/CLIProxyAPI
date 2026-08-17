@@ -89,6 +89,9 @@ func summarizeOAuthModelAliasList(list []config.OAuthModelAlias) OAuthModelAlias
 		if alias.MaxContextLength > 0 {
 			key += fmt.Sprintf("|max-context-length=%d", alias.MaxContextLength)
 		}
+		if alias.SourceMaxContextLength > 0 {
+			key += fmt.Sprintf("|source-max-context-length=%d", alias.SourceMaxContextLength)
+		}
 		if alias.ForceMapping {
 			key += "|force-mapping"
 		}

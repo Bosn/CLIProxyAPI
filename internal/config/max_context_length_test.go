@@ -39,8 +39,15 @@ openai-compatibility:
       - name: compat-upstream
         alias: compat-alias
         max-context-length: 1048576
+oauth-model-alias:
+  codex:
+    - name: gpt-5.6-sol
+      alias: gpt-5.6-sol-large-context
+      fork: true
+      max-context-length: 947369
+      source-max-context-length: 372000
 `
-	const jsonConfig = `{"codex-api-key":[{"models":[{"name":"codex-upstream","alias":"codex-alias","max-context-length":1048576}]}],"claude-api-key":[{"models":[{"name":"claude-upstream","alias":"claude-alias","max-context-length":1048576}]}],"gemini-api-key":[{"models":[{"name":"gemini-upstream","alias":"gemini-alias","max-context-length":1048576}]}],"interactions-api-key":[{"models":[{"name":"interactions-upstream","alias":"interactions-alias","max-context-length":1048576}]}],"xai-api-key":[{"models":[{"name":"xai-upstream","alias":"xai-alias","max-context-length":1048576}]}],"openai-compatibility":[{"models":[{"name":"compat-upstream","alias":"compat-alias","max-context-length":1048576}]}]}`
+	const jsonConfig = `{"codex-api-key":[{"models":[{"name":"codex-upstream","alias":"codex-alias","max-context-length":1048576}]}],"claude-api-key":[{"models":[{"name":"claude-upstream","alias":"claude-alias","max-context-length":1048576}]}],"gemini-api-key":[{"models":[{"name":"gemini-upstream","alias":"gemini-alias","max-context-length":1048576}]}],"interactions-api-key":[{"models":[{"name":"interactions-upstream","alias":"interactions-alias","max-context-length":1048576}]}],"xai-api-key":[{"models":[{"name":"xai-upstream","alias":"xai-alias","max-context-length":1048576}]}],"openai-compatibility":[{"models":[{"name":"compat-upstream","alias":"compat-alias","max-context-length":1048576}]}],"oauth-model-alias":{"codex":[{"name":"gpt-5.6-sol","alias":"gpt-5.6-sol-large-context","fork":true,"max-context-length":947369,"source-max-context-length":372000}]}}`
 
 	for _, testCase := range []struct {
 		name   string
@@ -80,6 +87,14 @@ openai-compatibility:
 				if model.got != want {
 					t.Errorf("%s max-context-length = %d, want %d", model.name, model.got, want)
 				}
+			}
+
+			aliases := cfg.OAuthModelAlias["codex"]
+			if len(aliases) != 1 {
+				t.Fatalf("OAuth aliases = %#v, want one codex alias", cfg.OAuthModelAlias)
+			}
+			if aliases[0].MaxContextLength != 947369 || aliases[0].SourceMaxContextLength != 372000 {
+				t.Errorf("OAuth alias context overrides = alias:%d source:%d, want alias:947369 source:372000", aliases[0].MaxContextLength, aliases[0].SourceMaxContextLength)
 			}
 		})
 	}

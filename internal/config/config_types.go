@@ -262,6 +262,10 @@ type OAuthModelAlias struct {
 	// MaxContextLength overrides the context window advertised for this alias.
 	MaxContextLength int `yaml:"max-context-length,omitempty" json:"max-context-length,omitempty"`
 
+	// SourceMaxContextLength overrides the context window advertised for the
+	// retained upstream model when Fork is true.
+	SourceMaxContextLength int `yaml:"source-max-context-length,omitempty" json:"source-max-context-length,omitempty"`
+
 	ForceMapping bool `yaml:"force-mapping,omitempty" json:"force-mapping,omitempty"`
 }
 

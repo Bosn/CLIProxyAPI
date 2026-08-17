@@ -24,7 +24,8 @@ func TestOAuthModelAliasManagementPreservesMaxContextLength(t *testing.T) {
 			"alias":"gpt-5.6-sol-large-context",
 			"fork":true,
 			"display-name":"GPT 5.6 Sol Large Context",
-			"max-context-length":947369
+			"max-context-length":947369,
+			"source-max-context-length":372000
 		}]
 	}`))
 	patchCtx.Request.Header.Set("Content-Type", "application/json")
@@ -53,5 +54,8 @@ func TestOAuthModelAliasManagementPreservesMaxContextLength(t *testing.T) {
 	}
 	if aliases[0].MaxContextLength != 947369 {
 		t.Fatalf("max-context-length = %d, want 947369", aliases[0].MaxContextLength)
+	}
+	if aliases[0].SourceMaxContextLength != 372000 {
+		t.Fatalf("source-max-context-length = %d, want 372000", aliases[0].SourceMaxContextLength)
 	}
 }
