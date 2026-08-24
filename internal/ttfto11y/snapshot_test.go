@@ -87,6 +87,31 @@ func TestSnapshotPersistsOnlyContentFreeAllowlistedFields(t *testing.T) {
 	}
 }
 
+func TestStartupSnapshotAtomicallyReplacesAnOldGenerationWithoutModelTraffic(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "o11y", "ttft-snapshot.json")
+	now := time.Date(2026, time.August, 9, 8, 30, 0, 0, time.UTC)
+	first := newStartupSnapshotPlugin(path, func() time.Time { return now })
+	firstDocument := readSnapshotDocument(t, path)
+	assertSnapshotConserved(t, firstDocument)
+	if firstDocument.SnapshotID != first.snapshotID || firstDocument.StartedAtMs != now.UnixMilli() ||
+		firstDocument.GeneratedAtMs != now.UnixMilli() || firstDocument.RetainedEventCount != 0 ||
+		firstDocument.ObservedCount != 0 || firstDocument.EmittedCount != 0 ||
+		firstDocument.CounterLimitReached {
+		t.Fatalf("unexpected zero-event startup snapshot: %+v", firstDocument)
+	}
+
+	now = now.Add(time.Second)
+	second := newStartupSnapshotPlugin(path, func() time.Time { return now })
+	secondDocument := readSnapshotDocument(t, path)
+	assertSnapshotConserved(t, secondDocument)
+	if secondDocument.SnapshotID != second.snapshotID ||
+		secondDocument.SnapshotID == firstDocument.SnapshotID ||
+		secondDocument.StartedAtMs != now.UnixMilli() || secondDocument.GeneratedAtMs != now.UnixMilli() ||
+		secondDocument.RetainedEventCount != 0 || secondDocument.LastSeq != 0 {
+		t.Fatalf("startup did not publish a fresh zero-event generation: %+v", secondDocument)
+	}
+}
+
 func TestSnapshotDeduplicatesOneAttemptButRetainsDistinctRetrySpans(t *testing.T) {
 	root := t.TempDir()
 	path := filepath.Join(root, "ttft-snapshot.json")
@@ -192,6 +217,125 @@ func TestSnapshotBoundsSkippedNonGenerationCounter(t *testing.T) {
 	if document.SkippedWarmupCount != uint64(maxSafeJSONInteger) {
 		t.Fatalf("skipped non-generation count = %d, want bounded maximum %d",
 			document.SkippedWarmupCount, maxSafeJSONInteger)
+	}
+}
+
+func TestSnapshotSaturatesOneObservationBranchWithoutBreakingConservation(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "ttft-snapshot.json")
+	now := time.Date(2026, time.August, 9, 8, 30, 0, 0, time.UTC)
+	plugin := newSnapshotPlugin(path, func() time.Time { return now })
+	plugin.observedCount = uint64(maxSafeJSONInteger - 1)
+	plugin.missingCorrelationCount = uint64(maxSafeJSONInteger - 1)
+
+	plugin.HandleUsage(context.Background(), coreusage.Record{})
+	document := readSnapshotDocument(t, path)
+	assertSnapshotConserved(t, document)
+	if document.ObservedCount != uint64(maxSafeJSONInteger) ||
+		document.MissingCorrelationCount != uint64(maxSafeJSONInteger) {
+		t.Fatalf("counters did not reach the exact safe ceiling: %+v", document)
+	}
+	if !document.CounterLimitReached {
+		t.Fatalf("safe-counter saturation was not persisted: %+v", document)
+	}
+	plugin.HandleUsage(context.Background(), coreusage.Record{})
+	after := readSnapshotDocument(t, path)
+	if !after.CounterLimitReached || after.ObservedCount != document.ObservedCount {
+		t.Fatalf("refused observation did not retain the persistent saturation marker: %+v", after)
+	}
+}
+
+func TestSnapshotRefusesBeforeObservedWhenAClassificationCounterIsAlreadySaturated(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "ttft-snapshot.json")
+	now := time.Date(2026, time.August, 9, 8, 30, 0, 0, time.UTC)
+	plugin := newSnapshotPlugin(path, func() time.Time { return now })
+	plugin.observedCount = uint64(maxSafeJSONInteger)
+	plugin.missingCorrelationCount = uint64(maxSafeJSONInteger)
+
+	plugin.HandleUsage(context.Background(), coreusage.Record{})
+	document := readSnapshotDocument(t, path)
+	assertSnapshotConserved(t, document)
+	if !document.CounterLimitReached ||
+		document.ObservedCount != uint64(maxSafeJSONInteger) ||
+		document.MissingCorrelationCount != uint64(maxSafeJSONInteger) {
+		t.Fatalf("saturated observation was not refused with a durable marker: %+v", document)
+	}
+}
+
+func TestSnapshotReportsAWriteFailureOnTheNextSuccessfulSnapshot(t *testing.T) {
+	root := t.TempDir()
+	blocked := filepath.Join(root, "blocked")
+	if errWrite := os.WriteFile(blocked, []byte("not a directory\n"), 0o600); errWrite != nil {
+		t.Fatalf("WriteFile() error = %v", errWrite)
+	}
+	now := time.Date(2026, time.August, 9, 8, 30, 0, 0, time.UTC)
+	plugin := newSnapshotPlugin(filepath.Join(blocked, "ttft-snapshot.json"), func() time.Time { return now })
+	record := coreusage.Record{
+		Provider: "openai", Model: "gpt-5.6-sol", CorrelationID: "4bf92f3577b34da6a3ce929d",
+		SampleID: "s_c2fab392c1cde0e40d2f97bd1b385913", TTFT: 250 * time.Millisecond,
+	}
+	plugin.HandleUsage(context.Background(), record)
+	if plugin.writeFailureCount != 1 || plugin.consecutiveWriteErrors != 1 {
+		t.Fatalf("write failure was not retained in memory: %+v", plugin)
+	}
+
+	if errRemove := os.Remove(blocked); errRemove != nil {
+		t.Fatalf("Remove() error = %v", errRemove)
+	}
+	if errMkdir := os.Mkdir(blocked, 0o700); errMkdir != nil {
+		t.Fatalf("Mkdir() error = %v", errMkdir)
+	}
+	now = now.Add(time.Minute)
+	record.SampleID = "s_17b58d8757c41ab484d8e28f1d080f69"
+	plugin.HandleUsage(context.Background(), record)
+	document := readSnapshotDocument(t, plugin.path)
+	assertSnapshotConserved(t, document)
+	if document.WriteFailureCount != 1 || document.RetainedEventCount != 2 ||
+		document.ObservedCount != 2 || document.EmittedCount != 2 {
+		t.Fatalf("recovery snapshot did not expose conserved write failure evidence: %+v", document)
+	}
+}
+
+func TestSnapshotConservationHoldsAcrossDuplicateMissingAndDropPaths(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "ttft-snapshot.json")
+	now := time.Date(2026, time.August, 9, 8, 30, 0, 0, time.UTC)
+	plugin := newSnapshotPlugin(path, func() time.Time { return now })
+	plugin.maxEvents = 1
+	record := coreusage.Record{
+		Provider: "openai", Model: "gpt-5.6-sol", CorrelationID: "4bf92f3577b34da6a3ce929d",
+		SampleID: "s_c2fab392c1cde0e40d2f97bd1b385913", TTFT: 250 * time.Millisecond,
+	}
+	plugin.HandleUsage(context.Background(), record)
+	plugin.HandleUsage(context.Background(), record)
+	record.SampleID = "s_17b58d8757c41ab484d8e28f1d080f69"
+	plugin.HandleUsage(context.Background(), record)
+	plugin.HandleUsage(context.Background(), coreusage.Record{})
+	plugin.HandleUsage(context.Background(), coreusage.Record{
+		CorrelationID: "4bf92f3577b34da6a3ce929d", TTFT: 250 * time.Millisecond,
+	})
+	plugin.HandleUsage(context.Background(), coreusage.Record{
+		CorrelationID: "4bf92f3577b34da6a3ce929d",
+		SampleID:      "s_8a5182b11c8d6d2de90043df1a73a55a",
+	})
+	document := readSnapshotDocument(t, path)
+	assertSnapshotConserved(t, document)
+	if document.DuplicateSampleCount != 1 || document.MissingCorrelationCount != 1 ||
+		document.MissingSampleIDCount != 1 || document.MissingTtftCount != 1 ||
+		document.DroppedCount != 1 || document.RetainedEventCount != 1 {
+		t.Fatalf("unexpected path counters: %+v", document)
+	}
+}
+
+func assertSnapshotConserved(t *testing.T, document snapshotDocument) {
+	t.Helper()
+	if document.ObservedCount != document.EmittedCount+document.MissingCorrelationCount+
+		document.MissingSampleIDCount+document.MissingTtftCount+document.DuplicateSampleCount {
+		t.Fatalf("observation counters are not conserved: %+v", document)
+	}
+	if document.EmittedCount != document.DroppedCount+uint64(document.RetainedEventCount) {
+		t.Fatalf("emission counters are not conserved: %+v", document)
+	}
+	if document.LastSeq != document.EmittedCount {
+		t.Fatalf("last sequence does not equal emitted count: %+v", document)
 	}
 }
 
