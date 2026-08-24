@@ -59,6 +59,7 @@ type snapshotDocument struct {
 	DuplicateSampleCount    uint64          `json:"duplicateSampleCount"`
 	DroppedCount            uint64          `json:"droppedCount"`
 	WriteFailureCount       uint64          `json:"writeFailureCount"`
+	CounterLimitReached     bool            `json:"counterLimitReached"`
 	Events                  []snapshotEvent `json:"events"`
 }
 
@@ -82,6 +83,8 @@ type snapshotPlugin struct {
 	droppedCount            uint64
 	writeFailureCount       uint64
 	consecutiveWriteErrors  uint64
+	counterLimitWarned      bool
+	counterLimitReached     bool
 }
 
 var registerDefaultOnce sync.Once
@@ -89,7 +92,10 @@ var registerDefaultOnce sync.Once
 // RegisterDefault attaches the snapshot projector to the existing usage manager.
 func RegisterDefault() {
 	registerDefaultOnce.Do(func() {
-		coreusage.RegisterNamedPlugin("cliproxyapi-ttft-o11y", newSnapshotPlugin(defaultSnapshotPath(), time.Now))
+		coreusage.RegisterNamedPlugin(
+			"cliproxyapi-ttft-o11y",
+			newStartupSnapshotPlugin(defaultSnapshotPath(), time.Now),
+		)
 	})
 }
 
@@ -127,6 +133,14 @@ func newSnapshotPlugin(path string, now func() time.Time) *snapshotPlugin {
 	}
 }
 
+func newStartupSnapshotPlugin(path string, now func() time.Time) *snapshotPlugin {
+	plugin := newSnapshotPlugin(path, now)
+	plugin.mu.Lock()
+	plugin.writeLocked(plugin.now())
+	plugin.mu.Unlock()
+	return plugin
+}
+
 func newSnapshotID(startedAt int64) string {
 	buffer := make([]byte, 12)
 	if _, errRead := rand.Read(buffer); errRead == nil {
@@ -142,23 +156,48 @@ func (p *snapshotPlugin) HandleUsage(_ context.Context, record coreusage.Record)
 	}
 	if !coreusage.GenerateEnabled(record.Generate) {
 		p.mu.Lock()
-		incrementBoundedCounter(&p.skippedWarmupCount)
+		if incrementBoundedCounter(&p.skippedWarmupCount) {
+			p.counterLimitReached = true
+			p.writeLocked(p.now())
+		}
 		p.mu.Unlock()
 		return
 	}
 	p.mu.Lock()
 	defer p.mu.Unlock()
+	if p.observedCount >= uint64(maxSafeJSONInteger) ||
+		p.emittedCount >= uint64(maxSafeJSONInteger) ||
+		p.nextSeq >= uint64(maxSafeJSONInteger) ||
+		p.missingCorrelationCount >= uint64(maxSafeJSONInteger) ||
+		p.missingSampleIDCount >= uint64(maxSafeJSONInteger) ||
+		p.missingTtftCount >= uint64(maxSafeJSONInteger) ||
+		p.duplicateSampleCount >= uint64(maxSafeJSONInteger) ||
+		p.droppedCount > uint64(maxSafeJSONInteger)-uint64(len(p.events)+1) {
+		if !p.counterLimitWarned {
+			log.Warn("TTFT O11Y snapshot counter limit reached; refusing new observations")
+			p.counterLimitWarned = true
+		}
+		p.counterLimitReached = true
+		p.writeLocked(p.now())
+		return
+	}
 
 	now := p.now()
 	p.pruneExpired(now)
-	p.observedCount++
+	if incrementBoundedCounter(&p.observedCount) {
+		p.counterLimitReached = true
+	}
 	if !validCorrelationID(record.CorrelationID) {
-		p.missingCorrelationCount++
+		if incrementBoundedCounter(&p.missingCorrelationCount) {
+			p.counterLimitReached = true
+		}
 		p.writeLocked(now)
 		return
 	}
 	if !validSampleID(record.SampleID) {
-		p.missingSampleIDCount++
+		if incrementBoundedCounter(&p.missingSampleIDCount) {
+			p.counterLimitReached = true
+		}
 		p.writeLocked(now)
 		return
 	}
@@ -167,19 +206,25 @@ func (p *snapshotPlugin) HandleUsage(_ context.Context, record coreusage.Record)
 		ttftMs = 1
 	}
 	if ttftMs <= 0 || ttftMs > maxSafeJSONInteger {
-		p.missingTtftCount++
+		if incrementBoundedCounter(&p.missingTtftCount) {
+			p.counterLimitReached = true
+		}
 		p.writeLocked(now)
 		return
 	}
 	for _, existing := range p.events {
 		if existing.SampleID == record.SampleID {
-			p.duplicateSampleCount++
+			if incrementBoundedCounter(&p.duplicateSampleCount) {
+				p.counterLimitReached = true
+			}
 			p.writeLocked(now)
 			return
 		}
 	}
 
-	p.nextSeq++
+	if incrementBoundedCounter(&p.nextSeq) {
+		p.counterLimitReached = true
+	}
 	event := snapshotEvent{
 		Seq:             p.nextSeq,
 		Ts:              now.UnixMilli(),
@@ -199,7 +244,9 @@ func (p *snapshotPlugin) HandleUsage(_ context.Context, record coreusage.Record)
 		event.TerminalClass = "failed"
 	}
 	p.events = append(p.events, event)
-	p.emittedCount++
+	if incrementBoundedCounter(&p.emittedCount) {
+		p.counterLimitReached = true
+	}
 	p.pruneCapacity()
 	p.writeLocked(now)
 }
@@ -212,7 +259,9 @@ func (p *snapshotPlugin) pruneExpired(now time.Time) {
 	retained := p.events[:0]
 	for _, event := range p.events {
 		if event.Ts < cutoff {
-			p.droppedCount++
+			if incrementBoundedCounter(&p.droppedCount) {
+				p.counterLimitReached = true
+			}
 			continue
 		}
 		retained = append(retained, event)
@@ -229,7 +278,9 @@ func (p *snapshotPlugin) pruneCapacity() {
 		return
 	}
 	drop := len(p.events) - limit
-	p.droppedCount += uint64(drop)
+	if addBoundedCounter(&p.droppedCount, uint64(drop)) {
+		p.counterLimitReached = true
+	}
 	copy(p.events, p.events[drop:])
 	p.events = p.events[:limit]
 }
@@ -256,11 +307,16 @@ func (p *snapshotPlugin) writeLocked(now time.Time) {
 		DuplicateSampleCount:    p.duplicateSampleCount,
 		DroppedCount:            p.droppedCount,
 		WriteFailureCount:       p.writeFailureCount,
+		CounterLimitReached:     p.counterLimitReached,
 		Events:                  append([]snapshotEvent(nil), p.events...),
 	}
 	if errWrite := writeSnapshot(p.path, document); errWrite != nil {
-		p.writeFailureCount++
-		p.consecutiveWriteErrors++
+		if incrementBoundedCounter(&p.writeFailureCount) {
+			p.counterLimitReached = true
+		}
+		if incrementBoundedCounter(&p.consecutiveWriteErrors) {
+			p.counterLimitReached = true
+		}
 		if p.consecutiveWriteErrors == 1 {
 			log.Warn("TTFT O11Y snapshot write failed")
 		}
@@ -272,11 +328,21 @@ func (p *snapshotPlugin) writeLocked(now time.Time) {
 	p.consecutiveWriteErrors = 0
 }
 
-func incrementBoundedCounter(value *uint64) {
+func incrementBoundedCounter(value *uint64) bool {
 	if value == nil || *value >= uint64(maxSafeJSONInteger) {
-		return
+		return true
 	}
 	(*value)++
+	return *value == uint64(maxSafeJSONInteger)
+}
+
+func addBoundedCounter(value *uint64, delta uint64) bool {
+	if value == nil || delta > uint64(maxSafeJSONInteger) ||
+		*value > uint64(maxSafeJSONInteger)-delta {
+		return true
+	}
+	*value += delta
+	return *value == uint64(maxSafeJSONInteger)
 }
 
 func writeSnapshot(path string, document snapshotDocument) error {
