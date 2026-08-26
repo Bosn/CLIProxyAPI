@@ -30,7 +30,7 @@ func TestGetOpenAICompatIncludesResponsesChatFields(t *testing.T) {
 					{Name: "mimo-v2.5", Alias: "", MaxContextLength: 1_000_000, ResponsesChatPhaseBridge: true},
 				},
 				SupportPromptCacheKey: true,
-ResponsesChatFidelity: true,
+				ResponsesChatFidelity: true,
 				DisableCooling:        &disableCooling,
 				RequestRetry:          &requestRetry,
 			},
