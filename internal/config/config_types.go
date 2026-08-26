@@ -682,7 +682,7 @@ type OpenAICompatibility struct {
 	// SupportPromptCacheKey enables derived prompt_cache_key injection for supported requests.
 	SupportPromptCacheKey bool `yaml:"support-prompt-cache-key,omitempty" json:"support-prompt-cache-key,omitempty"`
 
-// ResponsesChatFidelity preserves supported OpenAI Responses request fields when forwarding through Chat Completions.
+	// ResponsesChatFidelity preserves supported OpenAI Responses request fields when forwarding through Chat Completions.
 	ResponsesChatFidelity bool `yaml:"responses-chat-fidelity,omitempty" json:"responses-chat-fidelity,omitempty"`
 
 	// DisableCooling overrides the global cooling policy for this provider when set.
