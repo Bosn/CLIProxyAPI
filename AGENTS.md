@@ -57,3 +57,27 @@ go build -o test-output ./cmd/server && rm test-output # Verify compile (REQUIRE
 - Avoid panics in HTTP handlers; prefer logged errors and meaningful HTTP status codes
 - Timeouts are allowed only during credential acquisition; after an upstream connection is established, do not set timeouts for any subsequent network behavior. Intentional exceptions that must remain allowed are the Codex websocket liveness deadlines in `internal/runtime/executor/codex_websockets_executor.go`, the wsrelay session deadlines in `internal/wsrelay/session.go`, the management APICall timeout in `internal/api/handlers/management/api_tools.go`, and the `cmd/fetch_antigravity_models` utility timeouts
 - Avoid wall-clock `time.Sleep` in TTL, expiration, ordering, or cache-eviction unit tests due to platform timer granularity (e.g. Windows default timer resolution of ~15.6ms) and CI jitter under load; prefer controllable clocks (`nowFunc` / mock clock), explicit timestamp manipulation, or deterministic synchronization primitives.
+
+## Owner Fork Sync Policy (owner-maintained — keep through upstream rebases)
+
+This section explains how this working copy stays in sync with the owner's GitHub
+fork. Do not delete it when rebasing onto new upstream versions.
+
+- Upstream: https://github.com/router-for-me/CLIProxyAPI (remote `origin`)
+- Owner fork: https://github.com/Bosn/CLIProxyAPI (remote `fork`, `git@github.com:Bosn/CLIProxyAPI.git`)
+- Owner customizations are carried on branches named `bosn/<upstream-version>-owner-overlay`
+  (current: `bosn/v7.2.147-owner-overlay`). The fork's `main` must stay synced with
+  upstream main ("Sync fork" / "Update branch" on GitHub, or push upstream main to `fork`).
+- After ANY local change or upstream upgrade:
+  1. Rebase the owner commits onto the newest upstream tag/main.
+  2. Resolve conflicts; run `go build ./...` (Go 1.26+) and the affected package tests.
+  3. `git push fork <branch>` — never leave owner work local-only.
+  4. Optionally open a PR from the `bosn/...` branch against the fork's `main`.
+- When starting a fresh upgrade worktree, branch/clone from the fork so this policy
+  carries over; if cloning upstream instead, copy this section into the new AGENTS.md.
+- Machine notes (this EC2 host):
+  - `/etc/ssh/ssh_config.d/50-redhat.conf` has bad ownership, so pushes need:
+    `git -c core.sshCommand="ssh -F /dev/null -o StrictHostKeyChecking=accept-new" push fork <branch>`
+  - `go.mod` requires Go 1.26+; `GOSUMDB=off` blocks toolchain auto-download. If the
+    default `go` is older, use the cached toolchain:
+    `/home/ec2-user/go/pkg/mod/golang.org/toolchain@v0.0.1-go1.26.6.linux-amd64/bin/go`
