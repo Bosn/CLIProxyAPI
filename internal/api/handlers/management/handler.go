@@ -41,6 +41,8 @@ type Handler struct {
 	cfg                     *config.Config
 	configFilePath          string
 	mu                      sync.Mutex
+	quotaRecoveryMu         sync.Mutex
+	quotaRecoveryStartOnce  sync.Once
 	reloadMu                sync.Mutex
 	reloadGeneration        uint64
 	appliedReloadGeneration uint64
@@ -60,6 +62,7 @@ type Handler struct {
 	pluginStoreHTTPClient   pluginstore.HTTPDoer
 	pluginStoreRateLimiter  *pluginstore.GitHubRateLimiter
 	pluginReleases          pluginReleaseCache
+	codexQuotaUsageURL      string
 }
 
 type configReloadSnapshot struct {
@@ -80,6 +83,7 @@ func NewHandler(cfg *config.Config, configFilePath string, manager *coreauth.Man
 		tokenStore:          sdkAuth.GetTokenStore(),
 		allowRemoteOverride: envSecret != "",
 		envSecret:           envSecret,
+		codexQuotaUsageURL:  defaultCodexQuotaUsageBaseURL + codexQuotaUsagePath,
 	}
 	h.startAttemptCleanup()
 	return h
