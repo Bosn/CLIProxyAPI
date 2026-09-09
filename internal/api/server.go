@@ -262,6 +262,16 @@ func (s *Server) Handler() http.Handler {
 	return s.server.Handler
 }
 
+// StartQuotaRecoveryMonitor starts periodic recovery probes for cooling Codex
+// OAuth credentials. The probes use ChatGPT's usage endpoint and clear stale
+// CPA cooldowns after an upstream usage reset.
+func (s *Server) StartQuotaRecoveryMonitor(ctx context.Context) {
+	if s == nil || s.mgmt == nil {
+		return
+	}
+	s.mgmt.StartQuotaRecoveryMonitor(ctx)
+}
+
 // Start begins listening for and serving HTTP or HTTPS requests.
 // It's a blocking call and will only return on an unrecoverable error.
 //
