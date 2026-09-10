@@ -62,6 +62,60 @@ func TestApplyOpenAIResponsesChatPhaseBridgeAddsSystemMessage(t *testing.T) {
 	}
 }
 
+func TestApplyOpenAIResponsesChatPhaseBridgeDowngradesUnresolvedToolMessage(t *testing.T) {
+	t.Parallel()
+	source := []byte(`{"input":[{"type":"function_call_output","id":"fco_child","name":"create_thread","namespace":"codex_app","output":"child assignment"}]}`)
+	translated := []byte(`{
+		"model":"kimi-k3",
+		"messages":[
+			{"role":"system","content":"base"},
+			{"role":"tool","tool_call_id":"","name":"codex_app__create_thread","content":"<codex_delegation>child assignment</codex_delegation>"}
+		]
+	}`)
+
+	got := ApplyOpenAIResponsesChatPhaseBridge(source, translated)
+	if role := gjson.GetBytes(got, "messages.1.role").String(); role != "user" {
+		t.Fatalf("role = %q, want user; output=%s", role, got)
+	}
+	if gjson.GetBytes(got, "messages.1.tool_call_id").Exists() {
+		t.Fatalf("unresolved tool_call_id survived: %s", got)
+	}
+	if gjson.GetBytes(got, "messages.1.name").Exists() {
+		t.Fatalf("tool name survived on user context: %s", got)
+	}
+	text := gjson.GetBytes(got, "messages.1.content").String()
+	if !strings.Contains(text, "codex_app__create_thread result:") {
+		t.Fatalf("source label missing: %q", text)
+	}
+	if !strings.Contains(text, "<codex_delegation>child assignment</codex_delegation>") {
+		t.Fatalf("delegation content changed: %q", text)
+	}
+}
+
+func TestApplyOpenAIResponsesChatPhaseBridgeKeepsResolvedToolMessage(t *testing.T) {
+	t.Parallel()
+	source := []byte(`{"input":"hello"}`)
+	translated := []byte(`{
+		"model":"kimi-k3",
+		"messages":[
+			{"role":"system","content":"base"},
+			{"role":"assistant","tool_calls":[{"id":"call_1","type":"function","function":{"name":"lookup","arguments":"{}"}}]},
+			{"role":"tool","tool_call_id":"call_1","content":"ok"}
+		]
+	}`)
+
+	got := ApplyOpenAIResponsesChatPhaseBridge(source, translated)
+	if role := gjson.GetBytes(got, "messages.2.role").String(); role != "tool" {
+		t.Fatalf("role = %q, want tool; output=%s", role, got)
+	}
+	if callID := gjson.GetBytes(got, "messages.2.tool_call_id").String(); callID != "call_1" {
+		t.Fatalf("tool_call_id = %q, want call_1; output=%s", callID, got)
+	}
+	if text := gjson.GetBytes(got, "messages.2.content").String(); text != "ok" {
+		t.Fatalf("tool content = %q, want ok; output=%s", text, got)
+	}
+}
+
 func TestApplyOpenAIResponsesChatPhaseBridgeKeepsUnphasedHistoryAligned(t *testing.T) {
 	t.Parallel()
 	source := []byte(`{"input":[

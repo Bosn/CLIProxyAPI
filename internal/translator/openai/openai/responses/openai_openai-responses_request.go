@@ -8,6 +8,22 @@ import (
 	"github.com/tidwall/sjson"
 )
 
+// extractOutputToolCallID resolves the call ID of a tool output item from its
+// dedicated call-ID fields only. The generic "id" field is deliberately left
+// out: for Codex delegation outputs it carries the output item's own ID, not a
+// call ID, and treating it as one would suppress the owner's unresolved-tool
+// name annotation. Alternate IDs already matched by
+// translatorcommon.NormalizeResponsesToolCallOutputs arrive as "call_id".
+func extractOutputToolCallID(node gjson.Result) string {
+	if callID := strings.TrimSpace(node.Get("call_id").String()); callID != "" {
+		return callID
+	}
+	if toolCallID := strings.TrimSpace(node.Get("tool_call_id").String()); toolCallID != "" {
+		return toolCallID
+	}
+	return strings.TrimSpace(node.Get("callId").String())
+}
+
 // ConvertOpenAIResponsesRequestToOpenAIChatCompletions converts OpenAI responses format to OpenAI chat completions format.
 // It transforms the OpenAI responses API format (with instructions and input array) into the standard
 // OpenAI chat completions format (with messages array and system content).
@@ -264,10 +280,18 @@ func ConvertOpenAIResponsesRequestToOpenAIChatCompletions(modelName string, inpu
 				mergeableAssistantIndex = -1
 				// Handle function call output conversion to tool message
 				toolMessage := []byte(`{"role":"tool","tool_call_id":"","content":""}`)
-				callID := translatorcommon.ExtractResponsesCallID(item)
+				callID := extractOutputToolCallID(item)
 				if callID != "" {
 					toolMessage, _ = sjson.SetBytes(toolMessage, "tool_call_id", callID)
 					delete(awaitingToolOutputs, callID)
+				}
+				if callID == "" {
+					if name := strings.TrimSpace(item.Get("name").String()); name != "" {
+						if namespace := strings.TrimSpace(item.Get("namespace").String()); namespace != "" {
+							name = qualifyResponsesNamespaceToolName(namespace, name)
+						}
+						toolMessage, _ = sjson.SetBytes(toolMessage, "name", name)
+					}
 				}
 
 				if output := item.Get("output"); output.Exists() {
@@ -303,10 +327,18 @@ func ConvertOpenAIResponsesRequestToOpenAIChatCompletions(modelName string, inpu
 			case "custom_tool_call_output":
 				mergeableAssistantIndex = -1
 				toolMessage := []byte(`{"role":"tool","tool_call_id":"","content":""}`)
-				callID := translatorcommon.ExtractResponsesCallID(item)
+				callID := extractOutputToolCallID(item)
 				if callID != "" {
 					toolMessage, _ = sjson.SetBytes(toolMessage, "tool_call_id", callID)
 					delete(awaitingToolOutputs, callID)
+				}
+				if callID == "" {
+					if name := strings.TrimSpace(item.Get("name").String()); name != "" {
+						if namespace := strings.TrimSpace(item.Get("namespace").String()); namespace != "" {
+							name = qualifyResponsesNamespaceToolName(namespace, name)
+						}
+						toolMessage, _ = sjson.SetBytes(toolMessage, "name", name)
+					}
 				}
 				if output := item.Get("output"); output.Exists() {
 					toolMessage = setCustomToolCallOutputContent(toolMessage, output)
