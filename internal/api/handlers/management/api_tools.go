@@ -207,6 +207,8 @@ func (h *Handler) APICall(c *gin.Context) {
 		return
 	}
 
+	h.reconcileCodexQuotaAfterAPICall(c.Request.Context(), auth, method, parsedURL, resp.StatusCode, respBody)
+
 	c.JSON(http.StatusOK, apiCallResponse{
 		StatusCode: resp.StatusCode,
 		Header:     resp.Header,
