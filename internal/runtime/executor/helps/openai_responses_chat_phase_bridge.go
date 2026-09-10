@@ -21,7 +21,59 @@ func ApplyOpenAIResponsesChatPhaseBridge(source, translated []byte) []byte {
 		return translated
 	}
 	out, toolChoiceInstruction := normalizeOpenAIResponsesChatThinkingToolChoice(source, translated)
+	out = normalizeUnresolvedOpenAIResponsesChatToolMessages(out)
 	return addOpenAIResponsesChatPhaseInstruction(out, toolChoiceInstruction)
+}
+
+func normalizeUnresolvedOpenAIResponsesChatToolMessages(translated []byte) []byte {
+	messages := gjson.GetBytes(translated, "messages")
+	if !messages.IsArray() {
+		return translated
+	}
+
+	for index, message := range messages.Array() {
+		if message.Get("role").String() != "tool" {
+			continue
+		}
+		if callID := strings.TrimSpace(message.Get("tool_call_id").String()); callID != "" {
+			continue
+		}
+
+		name := strings.TrimSpace(message.Get("name").String())
+		label := "unresolved tool result"
+		if name != "" {
+			label = name
+		}
+
+		updated := []byte(message.Raw)
+		content := message.Get("content")
+		switch {
+		case content.Type == gjson.String:
+			updated, _ = sjson.SetBytes(updated, "content", label+" result:\n"+content.String())
+		case content.IsArray():
+			parts := []byte(`[]`)
+			lead := []byte(`{"type":"text","text":""}`)
+			lead, _ = sjson.SetBytes(lead, "text", label+" result:")
+			parts, _ = sjson.SetRawBytes(parts, "-1", lead)
+			for _, part := range content.Array() {
+				parts, _ = sjson.SetRawBytes(parts, "-1", []byte(part.Raw))
+			}
+			updated, _ = sjson.SetRawBytes(updated, "content", parts)
+		default:
+			updated, _ = sjson.SetBytes(updated, "content", label+" result")
+		}
+
+		updated, _ = sjson.SetBytes(updated, "role", "user")
+		for _, field := range []string{"tool_call_id", "name"} {
+			updated, _ = sjson.DeleteBytes(updated, field)
+		}
+		var errSet error
+		translated, errSet = sjson.SetRawBytes(translated, "messages."+strconv.Itoa(index), updated)
+		if errSet != nil {
+			continue
+		}
+	}
+	return translated
 }
 
 func normalizeOpenAIResponsesChatThinkingToolChoice(source, translated []byte) ([]byte, string) {

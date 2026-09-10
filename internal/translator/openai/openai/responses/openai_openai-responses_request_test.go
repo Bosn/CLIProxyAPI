@@ -190,6 +190,33 @@ func TestConvertOpenAIResponsesRequestToOpenAIChatCompletions_UnwrapsStringified
 	}
 }
 
+func TestConvertOpenAIResponsesRequestToOpenAIChatCompletions_AnnotatesCodexDelegationOutput(t *testing.T) {
+	raw := []byte(`{
+		"input":[
+			{"type":"function_call_output","id":"fco_child","name":"create_thread","namespace":"codex_app","output":"child assignment"}
+		]
+	}`)
+
+	out := ConvertOpenAIResponsesRequestToOpenAIChatCompletions("kimi-k3", raw, false)
+	messages := gjson.GetBytes(out, "messages").Array()
+	if len(messages) != 1 {
+		t.Fatalf("messages count = %d, want 1; output=%s", len(messages), out)
+	}
+
+	if role := messages[0].Get("role").String(); role != "tool" {
+		t.Fatalf("role = %q, want tool before phase-bridge sanitization; output=%s", role, out)
+	}
+	if callID := messages[0].Get("tool_call_id").String(); callID != "" {
+		t.Fatalf("tool_call_id = %q, want empty; output=%s", callID, out)
+	}
+	if name := messages[0].Get("name").String(); name != "codex_app__create_thread" {
+		t.Fatalf("name = %q, want codex_app__create_thread; output=%s", name, out)
+	}
+	if content := messages[0].Get("content").String(); content != "child assignment" {
+		t.Fatalf("content = %q, want child assignment; output=%s", content, out)
+	}
+}
+
 func TestConvertOpenAIResponsesRequestToOpenAIChatCompletions_UnwrapsStringifiedCustomToolOutputImages(t *testing.T) {
 	raw := []byte(`{
 		"input": [
