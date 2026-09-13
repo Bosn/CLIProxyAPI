@@ -66,7 +66,7 @@ fork. Do not delete it when rebasing onto new upstream versions.
 - Upstream: https://github.com/router-for-me/CLIProxyAPI (remote `origin`)
 - Owner fork: https://github.com/Bosn/CLIProxyAPI (remote `fork`, `git@github.com:Bosn/CLIProxyAPI.git`)
 - Owner customizations are carried on branches named `bosn/<upstream-version>-owner-overlay`
-  (current: `bosn/v7.2.157-owner-overlay`). The fork's `main` must stay synced with
+  (current: `bosn/v7.3.1-owner-overlay`). The fork's `main` must stay synced with
   upstream main ("Sync fork" / "Update branch" on GitHub, or push upstream main to `fork`).
 - After ANY local change or upstream upgrade:
   1. Rebase the owner commits onto the newest upstream tag/main.
